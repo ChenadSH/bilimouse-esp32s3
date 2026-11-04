@@ -67,8 +67,11 @@ esp_err_t hid_mouse_click(uint8_t button);
  */
 esp_err_t hid_mouse_button(uint8_t button, bool down);
 
-/** 释放所有鼠标按键（断连或切模式时兜底） */
+/** 释放所有鼠标按键（断连或切模式时兜底，同时释放键盘修饰键） */
 void hid_mouse_release_all(void);
+
+/** 按住 / 松开键盘修饰键（不自动释放，不触发按键） */
+esp_err_t hid_keyboard_modifier(uint8_t modifier, bool down);
 
 /** 鼠标按键位定义（与 HID 报告 byte0 一致） */
 #define HID_MOUSE_BTN_LEFT    0x01

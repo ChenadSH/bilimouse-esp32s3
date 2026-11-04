@@ -8,8 +8,9 @@
  *   touch_task   - 触摸：拖动 = 移动指针；轻点 = 左键；点按钮 = 执行动作
  *   hid_monitor_task - 蓝牙连接状态同步
  *
- * 交互模型（第四版）：
- *   1. 实体按键是鼠标右键：按下发"右键按下"，松开发"右键松开"。
+ * 交互模型（第五版）：
+ *   1. 实体按键 = 右键，用 Ctrl+左键 模拟（macOS 对第三方鼠标的
+ *      按钮 2 不响应，Ctrl+左键 是全局可靠的右键）。
  *   2. 屏幕是触控板：任意模式空白处拖动 = 移动指针（带增益，更灵敏）。
  *      轻点一下 = 左键单击；快速点两下 = 双击（两次 30ms 的 down/up
  *      间隔远小于 macOS 双击窗口，由系统自己判定，固件不猜）。
@@ -219,10 +220,17 @@ static void touch_cal_sync_ui(void)
 /* ==================== 任务 ==================== */
 
 /**
- * 实体按键任务：把一个普通轻触按键变成真正的鼠标右键。
+ * 实体按键任务：右键（Ctrl+左键 模拟）。
  *
- * 按下就发 right-button-down，松开发 right-button-up。
- * 右键没有"拖动"语义，直通主机即可，不需要任何手势判断。
+ * 为什么不直接发 HID 按钮 2？
+ *   macOS 对很多第三方 BLE 鼠标的按钮 2 不响应，而且系统设置里
+ *   没有对应的开关（用户实测"辅助点按"选项根本不存在）。
+ *   而 Control+左键 是 macOS 全局公认的右键，100% 可靠。
+ *
+ * 时序：
+ *   按下 -> Ctrl 按下
+ *   松开 -> 左键按下 -> 30ms -> 左键松开 -> Ctrl 松开
+ * macOS 在左键按下/松开期间一直看到 Ctrl 被按住 => 右键菜单。
  */
 static void input_task(void *arg)
 {
@@ -247,15 +255,24 @@ static void input_task(void *arg)
                     ready_warned = true;
                     ui_show_hint("蓝牙未就绪，按键暂不可用");
                 }
-            } else {
+            } else if (now) {
+                /* 按下：先按住 Ctrl */
                 ready_warned = false;
-                esp_err_t e = hid_mouse_button(HID_MOUSE_BTN_RIGHT, now);
-                /* 用 LOGI 而不是 LOGD：排查"右键没反应"时必须能看到
-                   按键事件到底发出去没有（串口默认 INFO 级别） */
-                ESP_LOGI(TAG, "mouse right button %s (%s)",
-                         now ? "down" : "up", esp_err_to_name(e));
+                esp_err_t e = hid_keyboard_modifier(HID_MOD_CTRL, true);
+                ESP_LOGI(TAG, "right-click: ctrl down (%s)", esp_err_to_name(e));
                 if (e == ESP_OK) {
-                    ui_show_hint(now ? "右键 ↓" : "右键 ↑");
+                    ui_show_hint("右键：Ctrl 按住，松手点击");
+                }
+            } else {
+                /* 松开：完成一次 Ctrl+左键，再放开 Ctrl */
+                esp_err_t e1 = hid_mouse_button(HID_MOUSE_BTN_LEFT, true);
+                vTaskDelay(pdMS_TO_TICKS(30));
+                esp_err_t e2 = hid_mouse_button(HID_MOUSE_BTN_LEFT, false);
+                esp_err_t e3 = hid_keyboard_modifier(HID_MOD_CTRL, false);
+                ESP_LOGI(TAG, "right-click: left click + ctrl up (%s %s %s)",
+                         esp_err_to_name(e1), esp_err_to_name(e2), esp_err_to_name(e3));
+                if (e1 == ESP_OK && e2 == ESP_OK) {
+                    ui_show_hint("已右键（Ctrl+左键）");
                 }
             }
         }

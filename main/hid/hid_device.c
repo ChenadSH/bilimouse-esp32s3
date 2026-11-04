@@ -45,6 +45,7 @@ static bool     s_connected = false;
 static bool     s_report_enabled = false; /* 主机已订阅输入报告(CCCD) */
 static hid_conn_state_t s_state = HID_STATE_IDLE;
 static uint8_t  s_btn_mask = 0;           /* 当前按住的鼠标按键（左/右/中） */
+static uint8_t  s_key_mod = 0;            /* 当前按住的键盘修饰键（Ctrl 等） */
 
 static esp_bd_addr_t s_peer_bda;          /* 当前/最近连接的对方地址 */
 static uint32_t s_connect_ms = 0;         /* 连接建立时刻，用于配对超时 */
@@ -483,6 +484,12 @@ esp_err_t hid_mouse_button(uint8_t button, bool down)
 /** 释放所有按键（断连/切模式时兜底，避免主机卡在"按下"状态） */
 void hid_mouse_release_all(void)
 {
+    /* 键盘修饰键也一并释放：实体右键靠 Ctrl+左键 模拟，
+       断连/切模式时如果 Ctrl 卡在按住状态，主机所有点击都会变成右键 */
+    if (s_key_mod != 0) {
+        s_key_mod = 0;
+        esp_hidd_send_keyboard_value(s_conn_id, 0, NULL, 0);
+    }
     if (s_btn_mask == 0) {
         return;
     }
@@ -490,6 +497,28 @@ void hid_mouse_release_all(void)
     if (hid_device_is_ready()) {
         esp_hidd_send_mouse_value(s_conn_id, 0, 0, 0);
     }
+}
+
+/**
+ * 按住 / 松开键盘修饰键（不自动释放，不按键）。
+ *
+ * 实体右键的实现方式：macOS 全局把 Control+左键 视为右键，
+ * 且该规则不依赖"系统识别出鼠标按钮 2"——很多 macOS 版本对
+ * 第三方 BLE 鼠标的右键（按钮 2）根本不响应，也没提供设置入口，
+ * Ctrl+左键 是唯一 100% 可靠的模拟方式。
+ */
+esp_err_t hid_keyboard_modifier(uint8_t modifier, bool down)
+{
+    if (!hid_device_is_ready()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (down) {
+        s_key_mod |= modifier;
+    } else {
+        s_key_mod &= (uint8_t)~modifier;
+    }
+    esp_hidd_send_keyboard_value(s_conn_id, s_key_mod, NULL, 0);
+    return ESP_OK;
 }
 esp_err_t hid_mouse_scroll(int8_t wheel)
 {
