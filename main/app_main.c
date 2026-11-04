@@ -42,11 +42,14 @@ static const char *TAG = "bilimouse";
 #define TOUCH_DEBUG 1
 
 /**
- * 触控板灵敏度增益：屏幕上拖 1 像素，主机指针移动 N 像素。
- * 1:1 时手在 320x240 的小屏上滑一格，光标在大屏上几乎不动，
- * 体感非常"迟钝"；增益 3 是实测比较跟手的值，嫌快/慢改这里即可。
+ * 触控板增益（自适应两段式）：
+ *   - 单次采样位移 <= TOUCH_GAIN_FINE_MAX 像素（手在慢慢微调）-> 1:1，
+ *     保证光标跟手指一样精细，能点到小目标；
+ *   - 超过阈值（快速滑动）-> TOUCH_GAIN_FAST 倍，屏幕小也能快速横跨大屏。
+ * 之前固定 3 倍的问题：微调时手抖 1 像素光标跳 3 像素，根本对不准。
  */
-#define TOUCH_GAIN 3
+#define TOUCH_GAIN_FINE_MAX 2
+#define TOUCH_GAIN_FAST     2
 
 static settings_t s_cfg;
 static bool s_mouse_mode = false;
@@ -246,8 +249,13 @@ static void input_task(void *arg)
                 }
             } else {
                 ready_warned = false;
-                if (hid_mouse_button(HID_MOUSE_BTN_RIGHT, now) == ESP_OK) {
-                    ESP_LOGD(TAG, "mouse right button %s", now ? "down" : "up");
+                esp_err_t e = hid_mouse_button(HID_MOUSE_BTN_RIGHT, now);
+                /* 用 LOGI 而不是 LOGD：排查"右键没反应"时必须能看到
+                   按键事件到底发出去没有（串口默认 INFO 级别） */
+                ESP_LOGI(TAG, "mouse right button %s (%s)",
+                         now ? "down" : "up", esp_err_to_name(e));
+                if (e == ESP_OK) {
+                    ui_show_hint(now ? "右键 ↓" : "右键 ↑");
                 }
             }
         }
@@ -328,13 +336,20 @@ static void touch_task(void *arg)
 #endif
                 } else if (!on_button) {
                     /* 拖动中（仅空白区）：移动主机指针。
-                       位移乘 TOUCH_GAIN 后可能超过 int8 上限(127)，
-                       按 ±127 分包连续发送，主机看到的是一条连续轨迹。 */
-                    int32_t fx = (int32_t)(sx - last_x) * TOUCH_GAIN;
-                    int32_t fy = (int32_t)(sy - last_y) * TOUCH_GAIN;
-                    if (fx || fy) {
-                        moved += (uint32_t)((fx > 0 ? fx : -fx) + (fy > 0 ? fy : -fy));
+                       增益自适应：慢慢微调时 1:1，快速滑动时放大。
+                       乘完增益可能超过 int8 上限(127)，按 ±127 分包连续发送。 */
+                    int32_t dx = (int32_t)(sx - last_x);
+                    int32_t dy = (int32_t)(sy - last_y);
+                    int32_t mag = (dx > 0 ? dx : -dx) + (dy > 0 ? dy : -dy);
+                    if (dx || dy) {
+                        /* ⚠️ moved 必须累计原始像素，不能累计乘过增益的位移：
+                           上一版在这里累加了 3 倍值，手指 4 像素的抖动就把
+                           moved 顶过阈值，轻点被误判成拖动 -> 左键失效。 */
+                        moved += (uint32_t)mag;
                         if (hid_device_is_ready()) {
+                            int32_t gain = (mag <= TOUCH_GAIN_FINE_MAX) ? 1 : TOUCH_GAIN_FAST;
+                            int32_t fx = dx * gain;
+                            int32_t fy = dy * gain;
                             while (fx || fy) {
                                 int8_t mdx = 0, mdy = 0;
                                 if (fx > 0)      { mdx = (fx >  127) ?  127 : (int8_t)fx; }
@@ -366,8 +381,10 @@ static void touch_task(void *arg)
                         /* 点击了按钮：执行对应动作 */
                         on_ui_button(pressed_btn, NULL);
                     }
-                } else if (s_mouse_mode && moved < 12 && (now - press_ms) < 400) {
-                    /* 鼠标模式下轻点空白处 = 左键单击 */
+                } else if (moved < 12 && (now - press_ms) < 400) {
+                    /* 轻点空白处 = 左键单击（鼠标/遥控模式都生效）。
+                       快速点两下 = 双击：由 macOS 在系统双击窗口内自动判定，
+                       固件只管把两次干净的 down/up 发出去。 */
                     perform_action(ACTION_CLICK_LEFT);
                 }
                 on_button = false;
