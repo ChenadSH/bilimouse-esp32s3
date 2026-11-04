@@ -7,6 +7,7 @@
  */
 #include "hid_device.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_bt.h"
@@ -39,37 +40,55 @@ static const char *TAG = "hid_device";
 
 /* ================= 状态 ================= */
 static uint16_t s_conn_id = 0;
-static bool     s_secure = false;       /* 已完成加密配对 */
+static bool     s_secure = false;         /* 已完成加密配对 */
 static bool     s_connected = false;
 static bool     s_report_enabled = false; /* 主机已订阅输入报告(CCCD) */
 static hid_conn_state_t s_state = HID_STATE_IDLE;
 
+static esp_bd_addr_t s_peer_bda;          /* 当前/最近连接的对方地址 */
+static uint32_t s_connect_ms = 0;         /* 连接建立时刻，用于配对超时 */
+static bool     s_adv_active = false;     /* 广播是否真的在跑（GAP 事件确认） */
+static uint32_t s_adv_last_try_ms = 0;
+static bool     s_pair_failed = false;    /* 最近一次配对失败（供 UI 提示） */
+static uint8_t  s_auth_fail = 0;          /* 连续配对失败次数 */
+
 /* ================= 广播数据 ================= */
 /*
- * 广播包总长上限 31 字节，字段写入顺序为：
- *   flags(3) -> appearance(4) -> name(N+2) -> txpower(3) -> service_uuid
+ * 广播包总长上限 31 字节，这里只放 4 个字段：
+ *   flags(3) + 服务UUID(4) + appearance(4) + 名字(11) = 22 字节
  *
- * 这里用 **16 位** HID 服务 UUID (0x1812) 而不是 128 位：
- *   128 位版本占 18 字节，减去名字后必然放不下 ->
- *   UUID 被截断成 0 长度，macOS / iOS 扫描时无法识别这是 HID 设备，
- *   表现为「能连上但收不到任何输入报告」。
- *   16 位版本只占 4 字节，是 BLE HID 规范（HID over GATT）的标准做法。
+ * ⚠️ 关键坑（曾导致「电脑搜不到 / 连不上」）：
+ *   IDF 的 btc 层只接受 **128 位格式** 的 UUID 缓冲区。它固定读 16 字节，
+ *   再按 BASE_UUID 逐字节比对，把其中「12 字节为 0 + 12/13 字节非 0」
+ *   的判定为 16 位 UUID（见 btc_gatt_util.c: uuidType）。
+ *   如果直接传一个 uint16_t（service_uuid_len = 2）：
+ *     - 会越界读 15 个字节，uuidType 判定失败 → 广播里塞进一个
+ *       128 位的垃圾 UUID，主机识别不到 0x1812 这个 HID 服务 → 拒绝连接
+ *     - 且 btc 用 service_uuid_len/16*2 计算 malloc 长度 = 0，
+ *       往 0 字节的堆块里写数据 → 堆破坏
+ *   正确写法：填满 16 字节小端 128 位格式，btc 会自动压缩成 2 字节
+ *   的 0x1812 写进广播包（占 4 字节）。
  */
-static uint16_t hidd_service_uuid16 = ESP_GATT_UUID_HID_SVC;   /* 0x1812 */
+static const uint8_t hid_service_uuid[16] = {
+    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
+    0x00, 0x10, 0x00, 0x00, 0x12, 0x18, 0x00, 0x00,   /* 00001812-0000-1000-8000-00805F9B34FB */
+};
 
 static esp_ble_adv_data_t s_adv_data = {
     .set_scan_rsp = false,
     .include_name = true,
-    .include_txpower = true,
-    .min_interval = ESP_BLE_GAP_CONN_ITVL_MS(7.5),
-    .max_interval = ESP_BLE_GAP_CONN_ITVL_MS(20),
+    .include_txpower = false,
+    /* 必须为 0：非 0 会让 IDF 再塞一个 6 字节的「连接间隔范围」AD 结构，
+       22 + 6 = 28，虽然还够，但纯属浪费广播空间且无实际作用 */
+    .min_interval = 0,
+    .max_interval = 0,
     .appearance = 0x03c0,      /* HID Generic */
     .manufacturer_len = 0,
     .p_manufacturer_data = NULL,
     .service_data_len = 0,
     .p_service_data = NULL,
-    .service_uuid_len = sizeof(hidd_service_uuid16),
-    .p_service_uuid = (uint8_t *)&hidd_service_uuid16,
+    .service_uuid_len = sizeof(hid_service_uuid),   /* 16：见上方说明，不能填 2 */
+    .p_service_uuid = (uint8_t *)hid_service_uuid,
     .flag = 0x6,
 };
 
@@ -81,6 +100,22 @@ static esp_ble_adv_params_t s_adv_params = {
     .channel_map = ADV_CHNL_ALL,
     .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
 };
+
+/* ================= 工具 ================= */
+
+static uint32_t now_ms(void)
+{
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+static void start_advertising(void)
+{
+    s_adv_last_try_ms = now_ms();
+    esp_err_t err = esp_ble_gap_start_advertising(&s_adv_params);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "start advertising failed: %s", esp_err_to_name(err));
+    }
+}
 
 /* ================= 事件回调 ================= */
 
@@ -110,12 +145,26 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
         break;
 
     case ESP_HIDD_EVENT_BLE_CONNECT:
-        ESP_LOGI(TAG, "BLE connected");
+        ESP_LOGI(TAG, "BLE connected: %02x:%02x:%02x:%02x:%02x:%02x",
+                 param->connect.remote_bda[0], param->connect.remote_bda[1],
+                 param->connect.remote_bda[2], param->connect.remote_bda[3],
+                 param->connect.remote_bda[4], param->connect.remote_bda[5]);
+        memcpy(s_peer_bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
         s_conn_id = param->connect.conn_id;
         s_connected = true;
         s_secure = false;
         s_report_enabled = false;
+        s_adv_active = false;
+        s_connect_ms = now_ms();
+        s_pair_failed = false;
         s_state = HID_STATE_CONNECTING;
+
+        /* 鼠标要求低延迟；主机可以拒绝，失败不影响功能 */
+        esp_ble_gap_set_prefer_conn_params(s_peer_bda,
+                                          ESP_BLE_GAP_CONN_ITVL_MS(7.5),
+                                          ESP_BLE_GAP_CONN_ITVL_MS(15),
+                                          0,
+                                          ESP_BLE_GAP_SUPERVISION_TIMEOUT_MS(4000));
         break;
 
     case ESP_HIDD_EVENT_BLE_DISCONNECT:
@@ -123,8 +172,9 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
         s_connected = false;
         s_secure = false;
         s_report_enabled = false;
+        s_adv_active = false;
         s_state = HID_STATE_ADVERTISING;
-        esp_ble_gap_start_advertising(&s_adv_params);
+        start_advertising();
         break;
 
     case ESP_HIDD_EVENT_BLE_VENDOR_REPORT_WRITE_EVT:
@@ -142,7 +192,28 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
 {
     switch (event) {
     case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
-        esp_ble_gap_start_advertising(&s_adv_params);
+        if (param->adv_data_cmpl.status != ESP_BT_STATUS_SUCCESS) {
+            ESP_LOGE(TAG, "set adv data FAILED, status=0x%x（广播包可能超过 31 字节）",
+                     param->adv_data_cmpl.status);
+        } else {
+            ESP_LOGI(TAG, "adv data set ok");
+        }
+        start_advertising();
+        break;
+
+    case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
+        if (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+            s_adv_active = true;
+            ESP_LOGI(TAG, "advertising started as '%s'", HIDD_DEVICE_NAME);
+        } else {
+            s_adv_active = false;
+            ESP_LOGE(TAG, "advertising start FAILED, status=0x%x",
+                     param->adv_start_cmpl.status);
+        }
+        break;
+
+    case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
+        s_adv_active = false;
         break;
 
     case ESP_GAP_BLE_SEC_REQ_EVT:
@@ -151,13 +222,32 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
 
     case ESP_GAP_BLE_AUTH_CMPL_EVT:
         if (param->ble_security.auth_cmpl.success) {
-            ESP_LOGI(TAG, "pairing success, secure connection established");
+            ESP_LOGI(TAG, "pairing success (encrypted link ready)");
             s_secure = true;
+            s_auth_fail = 0;
+            s_pair_failed = false;
             s_state = HID_STATE_READY;
         } else {
-            ESP_LOGE(TAG, "pairing failed, reason = 0x%x",
-                     param->ble_security.auth_cmpl.fail_reason);
+            uint8_t reason = param->ble_security.auth_cmpl.fail_reason;
+            ESP_LOGE(TAG, "pairing failed, reason=0x%x — 若电脑上还存着旧的配对记录，"
+                          "请在系统蓝牙设置里移除 '%s' 后重新配对", reason, HIDD_DEVICE_NAME);
             s_secure = false;
+            s_pair_failed = true;
+
+            if (s_auth_fail < 255) {
+                s_auth_fail++;
+            }
+            if (s_auth_fail >= 3) {
+                ESP_LOGW(TAG, "连续 %d 次配对失败，清除本机保存的配对密钥", s_auth_fail);
+                hid_device_clear_bonds();
+                s_auth_fail = 0;
+            }
+
+            /* 对方很可能存着一把和本机不匹配的旧 LTK，会反复发起加密请求。
+               不主动断开的话，现象就是「连上一秒就断、反复重连」。 */
+            if (s_connected) {
+                esp_ble_gap_disconnect(s_peer_bda);
+            }
         }
         break;
 
@@ -217,13 +307,20 @@ esp_err_t hid_device_init(void)
         return ret;
     }
 
+    /* ⚠️ 顺序很重要：GAP 回调必须在 profile 初始化之前注册。
+       esp_hidd_profile_init() 会在 GATT 注册完成后立刻回调 REG_FINISH，
+       我们在那里配置广播数据；若回调注册晚了一步，
+       「配置广播数据完成」事件就没人接，广播永远起不来 ——
+       表现为电脑根本搜不到设备。 */
+    esp_ble_gap_register_callback(gap_event_handler);
+    esp_ble_gap_set_device_name(HIDD_DEVICE_NAME);
+
     ret = esp_hidd_profile_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "hidd profile init failed");
         return ret;
     }
 
-    esp_ble_gap_register_callback(gap_event_handler);
     esp_hidd_register_callbacks(hidd_event_callback);
     esp_hidd_register_report_notify_cb(on_report_notify);
 
@@ -244,13 +341,60 @@ esp_err_t hid_device_init(void)
     esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(uint8_t));
     esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(uint8_t));
 
-    ESP_LOGI(TAG, "initialized, advertising as '%s'", HIDD_DEVICE_NAME);
+    const uint8_t *mac = esp_bt_dev_get_address();
+    if (mac != NULL) {
+        ESP_LOGI(TAG, "initialized, advertising as '%s', mac=%02x:%02x:%02x:%02x:%02x:%02x",
+                 HIDD_DEVICE_NAME, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    } else {
+        ESP_LOGI(TAG, "initialized, advertising as '%s'", HIDD_DEVICE_NAME);
+    }
     return ESP_OK;
 }
 
 hid_conn_state_t hid_device_state(void)
 {
     return s_state;
+}
+
+/** 是否刚发生过配对失败（供界面给出可操作的提示） */
+bool hid_device_pairing_failed(void)
+{
+    return s_pair_failed;
+}
+
+/**
+ * 清除本机保存的所有配对密钥（bonds）。
+ *
+ * 用途：电脑端存着一把旧密钥、本机又对不上时，链路会「连上就断」。
+ * 清掉本机记录后重新配对即可恢复。
+ */
+void hid_device_clear_bonds(void)
+{
+    int num = esp_ble_get_bond_device_num();
+    if (num <= 0) {
+        ESP_LOGI(TAG, "no bond record to clear");
+        return;
+    }
+    if (num > 16) {
+        num = 16;
+    }
+
+    esp_ble_bond_dev_t *list = calloc((size_t)num, sizeof(esp_ble_bond_dev_t));
+    if (list == NULL) {
+        ESP_LOGE(TAG, "out of memory while clearing bonds");
+        return;
+    }
+
+    int n = num;
+    if (esp_ble_get_bond_device_list(&n, list) == ESP_OK) {
+        for (int i = 0; i < n; i++) {
+            esp_ble_remove_bond_device(list[i].bd_addr);
+        }
+        ESP_LOGW(TAG, "cleared %d bond(s)", n);
+    } else {
+        ESP_LOGE(TAG, "failed to read bond list");
+    }
+    free(list);
 }
 
 /**
@@ -273,6 +417,31 @@ bool hid_device_is_ready(void)
 bool hid_device_report_enabled(void)
 {
     return s_report_enabled;
+}
+
+/**
+ * 蓝牙状态巡检（10Hz 左右由主循环调用）
+ *
+ * 两件事：
+ *   1. 广播看门狗 —— 广播可能因为时序/协议栈原因悄悄没起来，
+ *      这时设备在电脑上「根本不存在」，用户只会觉得「连不上」。
+ *   2. 配对超时 —— 连上了 8 秒还没加密，说明双方密钥对不上，
+ *      主动断开让主机重新发起配对，否则会卡在「连接中」永远不动。
+ */
+void hid_device_service(void)
+{
+    uint32_t now = now_ms();
+
+    if (!s_connected && !s_adv_active && (now - s_adv_last_try_ms) > 3000) {
+        ESP_LOGW(TAG, "advertising is not running, restarting");
+        start_advertising();
+    }
+
+    if (s_connected && !s_secure && (now - s_connect_ms) > 8000) {
+        ESP_LOGW(TAG, "no encryption within 8s, disconnecting so host can retry");
+        esp_ble_gap_disconnect(s_peer_bda);
+        s_connect_ms = now;
+    }
 }
 
 /* ================= 鼠标 ================= */

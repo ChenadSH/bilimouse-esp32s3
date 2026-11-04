@@ -16,6 +16,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs_flash.h"
 
 #include "actions.h"
 #include "bsp_button.h"
@@ -318,6 +319,8 @@ static void hid_monitor_task(void *arg)
     ui_conn_state_t last = UI_CONN_DISCONNECTED;
 
     while (1) {
+        hid_device_service();   /* 广播看门狗 + 配对超时保护 */
+
         ui_conn_state_t st;
         switch (hid_device_state()) {
         case HID_STATE_READY:      st = UI_CONN_CONNECTED;    break;
@@ -343,8 +346,15 @@ static void hid_monitor_task(void *arg)
                 ui_set_footer("设备名 BiliMouse");
                 break;
             default:
-                ui_show_action("未连接", "请先配对蓝牙");
-                ui_set_footer("设备名 BiliMouse");
+                /* 配对失败往往是因为电脑端存着一把旧密钥，
+                   这种提示能直接把用户引到正确的操作上 */
+                if (hid_device_pairing_failed()) {
+                    ui_show_action("配对失败", "电脑上移除设备后重试");
+                    ui_set_footer("蓝牙设置里忽略 BiliMouse");
+                } else {
+                    ui_show_action("未连接", "请先配对蓝牙");
+                    ui_set_footer("设备名 BiliMouse");
+                }
                 break;
             }
         }
@@ -354,9 +364,35 @@ static void hid_monitor_task(void *arg)
 
 /* ==================== 入口 ==================== */
 
+/**
+ * NVS 必须最先初始化。
+ *
+ * 之前 settings_load() 跑在 hid_device_init() 之前，而初始化 NVS 的代码
+ * 藏在 hid_device_init() 里面，于是启动日志必然出现
+ *   E settings: nvs open failed: ESP_ERR_NVS_NOT_INITIALIZED
+ * 后果不只是「读不到配置」：校准结果每次上电都会丢，
+ * 且配对密钥的持久化也依赖 NVS 已经就绪。
+ */
+static esp_err_t app_nvs_init(void)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "nvs full or version changed, erasing...");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    return err;
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "BiliMouse starting...");
+
+    esp_err_t nvs_err = app_nvs_init();
+    if (nvs_err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs init failed: %s (配置与配对信息将无法保存)",
+                 esp_err_to_name(nvs_err));
+    }
 
     settings_load(&s_cfg);
     imu_gesture_init(s_cfg.sensitivity);

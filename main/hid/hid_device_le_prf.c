@@ -560,14 +560,13 @@ void esp_hidd_prf_cb_hdl(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
             break;
         }
         case ESP_GATTS_CONF_EVT: {
-            /* BiliMouse 扩展：追踪主机是否订阅了输入报告(CCCD 写入)。
-             * 官方示例这里是空的，导致「连接成功但主机没订阅」时无法区分 ——
-             * 而这正是 macOS 上「能连上却收不到任何输入」的典型症状。 */
-            if (param->conf.handle == HIDD_LE_IDX_REPORT_MOUSE_IN_CCC ||
-                param->conf.handle == HIDD_LE_IDX_REPORT_KEY_IN_CCC ||
-                param->conf.handle == HIDD_LE_IDX_REPORT_CC_IN_CCC) {
-                esp_hidd_report_notify_status(param->conf.len ? true : false);
-            }
+            /* 这里原本用来判断主机是否订阅了输入报告，但参数不对：
+             *   1. conf.handle 是「通知句柄」的确认，不是 CCCD 写入；
+             *   2. HIDD_LE_IDX_* 是属性表索引（0/1/2...），不是真实句柄，
+             *      真实句柄在 hidd_le_env.hidd_inst.att_tbl[] 里。
+             * 两者永远不可能相等 -> s_report_enabled 永远是 false ->
+             * 应用层 hid_device_is_ready() 永远为假 -> 「连上了但按键/触摸没反应」。
+             * 正确的订阅检测放在下面的 ESP_GATTS_WRITE_EVT 里。 */
             break;
         }
         case ESP_GATTS_CREATE_EVT:
@@ -595,6 +594,21 @@ void esp_hidd_prf_cb_hdl(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
             break;
         case ESP_GATTS_WRITE_EVT: {
             esp_hidd_cb_param_t cb_param = {0};
+
+            /* BiliMouse 扩展：主机写 CCCD = 订阅/取消订阅输入报告。
+               必须用 att_tbl[] 里的真实句柄比较（索引值在这里没有意义）。 */
+            if (param->write.len == 2) {
+                uint16_t h_mouse = hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_REPORT_MOUSE_IN_CCC];
+                uint16_t h_key   = hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_REPORT_KEY_IN_CCC];
+                uint16_t h_cc    = hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_REPORT_CC_IN_CCC];
+                if (param->write.handle == h_mouse ||
+                    param->write.handle == h_key ||
+                    param->write.handle == h_cc) {
+                    uint16_t cccd = (uint16_t)(param->write.value[0] | (param->write.value[1] << 8));
+                    esp_hidd_report_notify_status((cccd & 0x0001) != 0);
+                }
+            }
+
             if (param->write.handle == hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_REPORT_LED_OUT_VAL]) {
                 cb_param.led_write.conn_id = param->write.conn_id;
                 cb_param.led_write.report_id = HID_RPT_ID_LED_OUT;

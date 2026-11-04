@@ -39,6 +39,15 @@ bool hid_device_is_ready(void);
 /** 主机是否已订阅输入报告（用于屏幕上的诊断提示） */
 bool hid_device_report_enabled(void);
 
+/** 最近一次配对是否失败（供界面提示，配对成功后自动清除） */
+bool hid_device_pairing_failed(void);
+
+/** 清除本机保存的所有配对密钥（bonds），下次连接将重新配对 */
+void hid_device_clear_bonds(void);
+
+/** 状态巡检：广播看门狗 + 配对超时保护，需定期调用（建议 100~200ms 一次） */
+void hid_device_service(void);
+
 /* ---------------- 鼠标 ---------------- */
 
 /** 发送鼠标移动（相对位移，单步） */
