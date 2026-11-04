@@ -1,7 +1,7 @@
 #include "bsp_touch.h"
 #include "bsp_board.h"
+#include "bsp_i2c.h"
 
-#include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -20,8 +20,8 @@ static const char *TAG = "bsp_touch";
 #define FT_PANEL_MAX_X       320
 #define FT_PANEL_MAX_Y       240
 
-static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_dev;
+static bool s_ready = false;
 
 static esp_err_t touch_read(uint8_t reg, uint8_t *buf, size_t len)
 {
@@ -36,30 +36,11 @@ static esp_err_t touch_write(uint8_t reg, uint8_t value)
 
 esp_err_t bsp_touch_init(void)
 {
-    esp_err_t err = i2c_new_master_bus(&(i2c_master_bus_config_t){
-        .i2c_port = BSP_I2C_PORT,
-        .sda_io_num = BSP_I2C_SDA,
-        .scl_io_num = BSP_I2C_SCL,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = 1,
-    }, &s_bus);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
-    }
-
-    err = i2c_master_bus_add_device(s_bus, &(i2c_device_config_t){
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = BSP_FT6336_ADDR,
-        .scl_speed_hz = BSP_I2C_FREQ_HZ,
-    }, &s_dev);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "add device failed: %s", esp_err_to_name(err));
-        return err;
-    }
+    /* 挂到共享 I2C 总线上（总线由 bsp_i2c 统一管理） */
+    ESP_RETURN_ON_ERROR(bsp_i2c_add_device(BSP_FT6336_ADDR, &s_dev), TAG, "add device failed");
 
     /* 切到正常工作模式 */
-    err = touch_write(FT_REG_DEVICE_MODE, 0x00);
+    esp_err_t err = touch_write(FT_REG_DEVICE_MODE, 0x00);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "FT6336 not responding at 0x%02X", BSP_FT6336_ADDR);
         return err;
@@ -69,13 +50,21 @@ esp_err_t bsp_touch_init(void)
     uint8_t chip_id = 0;
     touch_read(FT_REG_CHIP_ID, &chip_id, 1);
     ESP_LOGI(TAG, "initialized (chip_id=0x%02X)", chip_id);
+    s_ready = true;
     return ESP_OK;
 }
 
 esp_err_t bsp_touch_read(bsp_touch_data_t *data)
 {
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
     uint8_t buf[5];
-    ESP_RETURN_ON_ERROR(touch_read(FT_REG_TD_STATUS, buf, sizeof(buf)), TAG, "read failed");
+    esp_err_t err = touch_read(FT_REG_TD_STATUS, buf, sizeof(buf));
+    if (err != ESP_OK) {
+        return err;   /* 由调用方限流打印，避免 50Hz 刷屏饿死蓝牙任务 */
+    }
 
     uint8_t td_status = buf[0];
     data->pressed = false;

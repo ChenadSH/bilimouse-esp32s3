@@ -382,6 +382,11 @@ void app_main(void)
         ESP_LOGW(TAG, "imu init failed: %s (体感功能不可用)", esp_err_to_name(err));
     }
 
+    bool touch_ok = (bsp_touch_init() == ESP_OK);
+    if (!touch_ok) {
+        ESP_LOGW(TAG, "touch init failed (触摸功能不可用)");
+    }
+
     err = hid_device_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "hid init failed: %s", esp_err_to_name(err));
@@ -391,7 +396,9 @@ void app_main(void)
 
     xTaskCreate(ui_task, "ui_task", 4096, NULL, 4, NULL);
     xTaskCreate(input_task, "input_task", 4096, NULL, 5, NULL);
-    xTaskCreate(touch_task, "touch_task", 4096, NULL, 4, NULL);
+    if (touch_ok) {
+        xTaskCreate(touch_task, "touch_task", 4096, NULL, 4, NULL);
+    }
     xTaskCreate(hid_monitor_task, "hid_task", 3072, NULL, 4, NULL);
     if (bsp_imu_probe()) {
         xTaskCreate(imu_task, "imu_task", 4096, NULL, 4, NULL);

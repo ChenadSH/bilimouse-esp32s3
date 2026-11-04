@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "app_main.c"
+        "bsp/bsp_i2c.c"
         "bsp/bsp_pca9557.c"
         "bsp/bsp_lcd.c"
         "bsp/bsp_button.c"

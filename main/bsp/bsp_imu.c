@@ -1,5 +1,6 @@
 #include "bsp_imu.h"
 #include "bsp_board.h"
+#include "bsp_i2c.h"
 
 #include "driver/i2c_master.h"
 #include "esp_check.h"
@@ -53,7 +54,6 @@ static const char *TAG = "bsp_imu";
 #define QMI8658_GYR_SCALE      (1024.0f / 32768.0f)  /* ±1024 dps */
 #define QMI8658_TEMP_SCALE     (1.0f / 256.0f)
 
-static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_dev;
 
 static esp_err_t imu_write_reg(uint8_t reg, uint8_t value)
@@ -79,25 +79,8 @@ bool bsp_imu_probe(void)
 
 esp_err_t bsp_imu_init(void)
 {
-    /* I2C 总线可能已被 PCA9557 初始化，复用已有的 bus handle */
-    esp_err_t err = i2c_new_master_bus(&(i2c_master_bus_config_t){
-        .i2c_port = BSP_I2C_PORT,
-        .sda_io_num = BSP_I2C_SDA,
-        .scl_io_num = BSP_I2C_SCL,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = 1,
-    }, &s_bus);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "i2c bus init failed: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    err = i2c_master_bus_add_device(s_bus, &(i2c_device_config_t){
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = BSP_QMI8658_ADDR,
-        .scl_speed_hz = BSP_I2C_FREQ_HZ,
-    }, &s_dev);
+    /* 总线由 bsp_i2c 统一管理 */
+    esp_err_t err = bsp_i2c_add_device(BSP_QMI8658_ADDR, &s_dev);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "add device failed: %s", esp_err_to_name(err));
         return err;
