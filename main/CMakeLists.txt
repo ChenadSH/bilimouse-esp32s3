@@ -1,0 +1,37 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "bsp/bsp_pca9557.c"
+        "bsp/bsp_lcd.c"
+        "bsp/bsp_button.c"
+        "bsp/bsp_imu.c"
+        "bsp/bsp_touch.c"
+        "app/settings.c"
+        "app/button_fsm.c"
+        "app/actions.c"
+        "app/imu_gesture.c"
+        "ui/ui.c"
+        "ui/ui_font.c"
+        "hid/hid_device.c"
+        # ESP-IDF 官方 BLE HID profile 层（Unlicense / CC0-1.0）
+        "hid/esp_hidd_prf_api.c"
+        "hid/hid_dev.c"
+        "hid/hid_device_le_prf.c"
+    INCLUDE_DIRS
+        "."
+        "bsp"
+        "app"
+        "ui"
+        "hid"
+    REQUIRES
+        bt
+        nvs_flash
+        esp_driver_gpio
+        esp_driver_i2c
+        esp_driver_spi
+        esp_driver_ledc
+        esp_lcd
+        esp_timer
+)
+
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-unused-const-variable)
