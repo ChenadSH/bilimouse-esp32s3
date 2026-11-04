@@ -11,6 +11,7 @@ idf_component_register(
         "app/actions.c"
         "app/imu_gesture.c"
         "app/pointer.c"
+        "app/calibrate.c"
         "ui/ui.c"
         "ui/ui_font.c"
         "hid/hid_device.c"

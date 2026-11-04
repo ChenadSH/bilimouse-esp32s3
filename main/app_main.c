@@ -22,6 +22,7 @@
 #include "bsp_imu.h"
 #include "bsp_touch.h"
 #include "button_fsm.h"
+#include "calibrate.h"
 #include "hid_device.h"
 #include "imu_gesture.h"
 #include "pointer.h"
@@ -82,7 +83,12 @@ static void on_gesture(gesture_t gesture, void *ctx)
 
     case GESTURE_DOUBLE_CLICK:
         if (s_mouse_mode) {
-            perform_action(ACTION_SCROLL_DOWN);
+            /* 鼠标模式下双击 = 进入校准模式 */
+            if (calibrate_is_active()) {
+                calibrate_exit();
+            } else {
+                calibrate_enter();
+            }
         } else {
             perform_action(ACTION_PREV_EPISODE);
         }
@@ -108,7 +114,11 @@ static void on_gesture(gesture_t gesture, void *ctx)
 
     case GESTURE_HOLD_START:
         /* 按住提示：告诉用户松手会发生什么（动作尚未执行） */
-        ui_show_hint("松开 = 播放/暂停");
+        if (s_mouse_mode) {
+            ui_show_hint("松开 = 进入校准模式");
+        } else {
+            ui_show_hint("松开 = 播放/暂停");
+        }
         break;
 
     case GESTURE_HOLD_SUPER:
@@ -148,8 +158,9 @@ static void input_task(void *arg)
 
 /**
  * 触摸任务：
+ *   校准模式 - 点击按钮 = 选择要校准的目标 / 确认 / 退出
  *   鼠标模式 - 拖动 = 相对移动鼠标指针（触控板体验）
- *   遥控模式 - 点击 = 快捷动作（下一集/播放暂停）
+ *   遥控模式 - 点击 = 快捷动作（下一集 / 播放暂停）
  */
 static void touch_task(void *arg)
 {
@@ -170,8 +181,8 @@ static void touch_task(void *arg)
                     int16_t dx = (int16_t)(t.x - last_x);
                     int16_t dy = (int16_t)(t.y - last_y);
                     if (dx || dy) {
-                        if (s_mouse_mode && hid_device_is_ready()) {
-                            /* 触控板：滑动 -> 相对移动指针 */
+                        /* 鼠标模式与校准模式下，滑动都用于移动主机指针 */
+                        if ((s_mouse_mode || calibrate_is_active()) && hid_device_is_ready()) {
                             int8_t mdx = (dx > 127) ? 127 : ((dx < -127) ? -127 : (int8_t)dx);
                             int8_t mdy = (dy > 127) ? 127 : ((dy < -127) ? -127 : (int8_t)dy);
                             hid_mouse_move(mdx, mdy);
@@ -185,8 +196,12 @@ static void touch_task(void *arg)
             } else if (was_pressed) {
                 /* 触摸结束 */
                 was_pressed = false;
-                if (!s_mouse_mode && hid_device_is_ready()) {
-                    /* 遥控模式：屏幕下半区点击 = 切换下一集 */
+
+                if (calibrate_is_active()) {
+                    /* 校准界面：点击按钮 */
+                    calibrate_on_touch(t.x, t.y);
+                } else if (!s_mouse_mode && hid_device_is_ready()) {
+                    /* 遥控模式：屏幕下半区点击 = 切换下一集，上半区 = 播放/暂停 */
                     if (t.y > 120) {
                         perform_action(ACTION_NEXT_EPISODE);
                     } else {
@@ -283,6 +298,7 @@ void app_main(void)
     settings_load(&s_cfg);
     imu_gesture_init(s_cfg.sensitivity);
     pointer_init();
+    calibrate_init();
 
     esp_err_t err = ui_init();
     if (err != ESP_OK) {

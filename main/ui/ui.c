@@ -259,6 +259,34 @@ static void draw_footer(void)
     }
 }
 
+/** 带文字的按钮 */
+static void draw_button(int x, int y, int w, int h, const char *label, uint16_t accent)
+{
+    fill_round_rect(x, y, w, h, 6, COL_PANEL);
+    /* 边框用强调色 */
+    fill_rect(x, y, w, 2, accent);
+    fill_rect(x, y + h - 2, w, 2, accent);
+
+    int tw = text_width(label);
+    int tx = x + (w - tw) / 2;
+    int ty = y + (h - 16) / 2;
+    draw_text(tx, ty, label, COL_TEXT, w - 8);
+}
+
+/** 校准模式的额外界面 */
+static void draw_calibrate_panel(void)
+{
+    draw_button(UI_BTN_NEXT_X0, UI_BTN_NEXT_Y0,
+                UI_BTN_NEXT_X1 - UI_BTN_NEXT_X0, UI_BTN_NEXT_Y1 - UI_BTN_NEXT_Y0,
+                "下一集", COL_ACCENT);
+    draw_button(UI_BTN_PREV_X0, UI_BTN_PREV_Y0,
+                UI_BTN_PREV_X1 - UI_BTN_PREV_X0, UI_BTN_PREV_Y1 - UI_BTN_PREV_Y0,
+                "上一集", COL_ACCENT);
+    draw_button(UI_BTN_EXIT_X0, UI_BTN_EXIT_Y0,
+                UI_BTN_EXIT_X1 - UI_BTN_EXIT_X0, UI_BTN_EXIT_Y1 - UI_BTN_EXIT_Y0,
+                "完成", COL_OK);
+}
+
 static void redraw(void)
 {
     if (!s_buf) {
@@ -267,6 +295,11 @@ static void redraw(void)
     fill_rect(0, 0, SCR_W, SCR_H, COL_BG);
     draw_header();
     draw_main_area();
+
+    if (s_mode == UI_MODE_CALIBRATE) {
+        draw_calibrate_panel();
+    }
+
     draw_footer();
 
     esp_lcd_panel_draw_bitmap(s_lcd.panel, 0, 0, SCR_W, SCR_H, s_buf);

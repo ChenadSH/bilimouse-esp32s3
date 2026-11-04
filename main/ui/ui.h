@@ -30,6 +30,20 @@ typedef enum {
     UI_MODE_CALIBRATE,    /* 校准模式 */
 } ui_mode_t;
 
+/** 校准界面上的按钮区域（供触摸命中判定使用） */
+#define UI_BTN_NEXT_X0   20
+#define UI_BTN_NEXT_X1   150
+#define UI_BTN_NEXT_Y0   120
+#define UI_BTN_NEXT_Y1   180
+#define UI_BTN_PREV_X0   170
+#define UI_BTN_PREV_X1   300
+#define UI_BTN_PREV_Y0   120
+#define UI_BTN_PREV_Y1   180
+#define UI_BTN_EXIT_X0   120
+#define UI_BTN_EXIT_X1   200
+#define UI_BTN_EXIT_Y0   195
+#define UI_BTN_EXIT_Y1   230
+
 /** 初始化 UI（创建双缓冲） */
 esp_err_t ui_init(void);
 
