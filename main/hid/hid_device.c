@@ -546,9 +546,12 @@ esp_err_t hid_mouse_click(uint8_t button)
     if (!hid_device_is_ready()) {
         return ESP_ERR_INVALID_STATE;
     }
-    /* 按下 */
+    /* 按下。保持时长有讲究：macOS 会折叠靠得太近的 HID 报告，
+       down/up 间隔太短(如 30ms)会被折叠成"什么都没发生"——
+       症状正是移动正常、滚轮正常、点击无效。真鼠标一次点击
+       按下 80~120ms，这里取 80ms，各平台都能稳定注册。 */
     esp_hidd_send_mouse_value(s_conn_id, button, 0, 0);
-    vTaskDelay(pdMS_TO_TICKS(30));
+    vTaskDelay(pdMS_TO_TICKS(80));
     /* 释放 */
     esp_hidd_send_mouse_value(s_conn_id, 0, 0, 0);
     return ESP_OK;

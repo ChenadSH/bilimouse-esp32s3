@@ -264,10 +264,14 @@ static void input_task(void *arg)
                     ui_show_hint("右键：Ctrl 按住，松手点击");
                 }
             } else {
-                /* 松开：完成一次 Ctrl+左键，再放开 Ctrl */
+                /* 松开：完成一次 Ctrl+左键，再放开 Ctrl。
+                   左键按下保持 80ms(同 hid_mouse_click 的原因)，
+                   左键松开后也隔 50ms 再放 Ctrl，每一步之间都留出
+                   足够间隔，避免 macOS 把相邻报告折叠掉。 */
                 esp_err_t e1 = hid_mouse_button(HID_MOUSE_BTN_LEFT, true);
-                vTaskDelay(pdMS_TO_TICKS(30));
+                vTaskDelay(pdMS_TO_TICKS(80));
                 esp_err_t e2 = hid_mouse_button(HID_MOUSE_BTN_LEFT, false);
+                vTaskDelay(pdMS_TO_TICKS(50));
                 esp_err_t e3 = hid_keyboard_modifier(HID_MOD_CTRL, false);
                 ESP_LOGI(TAG, "right-click: left click + ctrl up (%s %s %s)",
                          esp_err_to_name(e1), esp_err_to_name(e2), esp_err_to_name(e3));
