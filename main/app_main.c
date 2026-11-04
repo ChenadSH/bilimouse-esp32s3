@@ -4,14 +4,15 @@
  *
  * 任务编排：
  *   ui_task      - 界面刷新（约 20fps）
- *   input_task   - 实体按键 -> 鼠标左键（按下/松开直通主机）
- *   touch_task   - 触摸：拖动 = 移动指针；点按钮 = 执行动作
+ *   input_task   - 实体按键 -> 鼠标右键（按下/松开直通主机）
+ *   touch_task   - 触摸：拖动 = 移动指针；轻点 = 左键；点按钮 = 执行动作
  *   hid_monitor_task - 蓝牙连接状态同步
  *
- * 交互模型（第三版，按真机反馈收敛）：
- *   1. 实体按键就是鼠标左键：按下发送"左键按下"，松开发送"左键松开"。
- *      单击 / 双击 / 按住拖动全部由 macOS 自己判定，固件不猜。
- *   2. 屏幕是触控板：任意模式空白处拖动 = 移动指针。
+ * 交互模型（第四版）：
+ *   1. 实体按键是鼠标右键：按下发"右键按下"，松开发"右键松开"。
+ *   2. 屏幕是触控板：任意模式空白处拖动 = 移动指针（带增益，更灵敏）。
+ *      轻点一下 = 左键单击；快速点两下 = 双击（两次 30ms 的 down/up
+ *      间隔远小于 macOS 双击窗口，由系统自己判定，固件不猜）。
  *   3. 每个功能都有屏上按钮，不依赖任何隐藏手势。
  *   4. 体感不再参与播放控制（床上翻身误触发太多）。
  */
@@ -40,6 +41,13 @@ static const char *TAG = "bilimouse";
 /* 触摸排查开关：打开后每次按下会打印一次原始/映射坐标 */
 #define TOUCH_DEBUG 1
 
+/**
+ * 触控板灵敏度增益：屏幕上拖 1 像素，主机指针移动 N 像素。
+ * 1:1 时手在 320x240 的小屏上滑一格，光标在大屏上几乎不动，
+ * 体感非常"迟钝"；增益 3 是实测比较跟手的值，嫌快/慢改这里即可。
+ */
+#define TOUCH_GAIN 3
+
 static settings_t s_cfg;
 static bool s_mouse_mode = false;
 static int  s_cal_shown_stage = -1;   /* 触摸校准界面当前展示的阶段 */
@@ -58,10 +66,10 @@ static void set_mouse_mode(bool on)
     ui_set_mode(on ? UI_MODE_MOUSE : UI_MODE_REMOTE);
     if (on) {
         ui_show_action("鼠标模式", "全屏当触控板");
-        ui_set_footer("拖动=移动  实体键=左键");
+        ui_set_footer("拖动=移动  轻点=左键  实体键=右键");
     } else {
         ui_show_action("遥控模式", "点屏幕按钮操作");
-        ui_set_footer("拖动=移动  实体键=左键");
+        ui_set_footer("拖动=移动  实体键=右键");
     }
 }
 
@@ -155,7 +163,7 @@ static void on_touch_cal_done(bool ok)
 
     if (ok) {
         ui_show_action("触摸已校准", "点按钮试试");
-        ui_set_footer("拖动=移动  实体键=左键");
+        ui_set_footer("拖动=移动  实体键=右键");
         ESP_LOGI(TAG, "touch calibration finished");
     } else {
         ui_show_action("校准未完成", "点校准按钮可重做");
@@ -208,16 +216,10 @@ static void touch_cal_sync_ui(void)
 /* ==================== 任务 ==================== */
 
 /**
- * 实体按键任务：把一个普通轻触按键变成真正的鼠标左键。
+ * 实体按键任务：把一个普通轻触按键变成真正的鼠标右键。
  *
- * 为什么不做手势识别？
- *   以前是「单击=下一集 / 双击=上一集 / 长按=播放暂停」，需要固件自己计时判断，
- *   结果三个问题一起出现：双击窗口和系统不一致、长按和拖动打架、
- *   而用户真正想要的只是「当鼠标用」。
- *
- * 现在的做法：按下就发 left-button-down，松开发 left-button-up。
- *   单击、双击、三击、按住拖动、框选，全部由 macOS 自己按系统设置判定，
- *   行为和一只有线鼠标完全一致，不存在"设备以为双击了、系统以为是两次单击"。
+ * 按下就发 right-button-down，松开发 right-button-up。
+ * 右键没有"拖动"语义，直通主机即可，不需要任何手势判断。
  */
 static void input_task(void *arg)
 {
@@ -227,7 +229,7 @@ static void input_task(void *arg)
     bool ready_warned = false;
 
     /* 上电时 GPIO0 常被外部拉低（进入下载模式的那颗 strapping 脚），
-       先等它稳定松开，避免一开机就给主机发一次"左键按下"，光标卡住。 */
+       先等它稳定松开，避免一开机就给主机发一次"右键按下"。 */
     vTaskDelay(pdMS_TO_TICKS(120));
     last = (bsp_button_get_state() == BSP_BUTTON_PRESSED);
 
@@ -244,8 +246,8 @@ static void input_task(void *arg)
                 }
             } else {
                 ready_warned = false;
-                if (hid_mouse_button(HID_MOUSE_BTN_LEFT, now) == ESP_OK) {
-                    ESP_LOGD(TAG, "mouse left button %s", now ? "down" : "up");
+                if (hid_mouse_button(HID_MOUSE_BTN_RIGHT, now) == ESP_OK) {
+                    ESP_LOGD(TAG, "mouse right button %s", now ? "down" : "up");
                 }
             }
         }
@@ -325,16 +327,25 @@ static void touch_task(void *arg)
                              t.raw_x, t.raw_y, sx, sy, (int)pressed_btn);
 #endif
                 } else if (!on_button) {
-                    /* 拖动中（仅空白区）：移动主机指针 */
-                    int16_t dx = (int16_t)(sx - last_x);
-                    int16_t dy = (int16_t)(sy - last_y);
-                    if (dx || dy) {
-                        moved += (uint32_t)((dx > 0 ? dx : -dx) + (dy > 0 ? dy : -dy));
+                    /* 拖动中（仅空白区）：移动主机指针。
+                       位移乘 TOUCH_GAIN 后可能超过 int8 上限(127)，
+                       按 ±127 分包连续发送，主机看到的是一条连续轨迹。 */
+                    int32_t fx = (int32_t)(sx - last_x) * TOUCH_GAIN;
+                    int32_t fy = (int32_t)(sy - last_y) * TOUCH_GAIN;
+                    if (fx || fy) {
+                        moved += (uint32_t)((fx > 0 ? fx : -fx) + (fy > 0 ? fy : -fy));
                         if (hid_device_is_ready()) {
-                            int8_t mdx = (dx > 127) ? 127 : ((dx < -127) ? -127 : (int8_t)dx);
-                            int8_t mdy = (dy > 127) ? 127 : ((dy < -127) ? -127 : (int8_t)dy);
-                            hid_mouse_move(mdx, mdy);
-                            pointer_track(mdx, mdy);
+                            while (fx || fy) {
+                                int8_t mdx = 0, mdy = 0;
+                                if (fx > 0)      { mdx = (fx >  127) ?  127 : (int8_t)fx; }
+                                else if (fx < 0) { mdx = (fx < -127) ? -127 : (int8_t)fx; }
+                                if (fy > 0)      { mdy = (fy >  127) ?  127 : (int8_t)fy; }
+                                else if (fy < 0) { mdy = (fy < -127) ? -127 : (int8_t)fy; }
+                                hid_mouse_move(mdx, mdy);
+                                pointer_track(mdx, mdy);
+                                fx -= mdx;
+                                fy -= mdy;
+                            }
                         }
                     }
                     last_x = (int16_t)sx;
@@ -402,7 +413,7 @@ static void hid_monitor_task(void *arg)
             switch (st) {
             case UI_CONN_CONNECTED:
                 ui_show_action("已连接", "点屏幕按钮即可操作");
-                ui_set_footer("实体键 = 鼠标左键");
+                ui_set_footer("实体键=右键  屏幕轻点=左键");
                 break;
             case UI_CONN_PAIRING:
                 /* 区分「主机未订阅」与「还没配好」，给出可操作的提示 */

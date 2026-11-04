@@ -85,7 +85,10 @@ esp_err_t action_execute(action_t action, const action_ctx_t *ctx)
         break;
 
     case ACTION_CLICK_LEFT:
-        ESP_RETURN_ON_ERROR(hid_mouse_click(HID_MOUSE_LEFT), TAG, "click failed");
+        /* 注意：必须用 hid_device.h 里的按键掩码(0x01/0x02)，
+           不能用 hid_dev.h 的 HID_MOUSE_LEFT=253 —— 那是官方 demo
+           遗留的旧 cmd 值，直接当掩码发等于同时按下 6 个键。 */
+        ESP_RETURN_ON_ERROR(hid_mouse_click(HID_MOUSE_BTN_LEFT), TAG, "click failed");
         break;
 
     case ACTION_SCROLL_UP:
