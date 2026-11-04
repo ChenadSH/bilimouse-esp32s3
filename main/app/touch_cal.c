@@ -10,19 +10,20 @@
 
 static const char *TAG = "touch_cal";
 
-/* 三个目标点（屏幕坐标）。避开顶部信息卡与底部提示条，躺着也能点准 */
-#define P1_X  40
-#define P1_Y  124
-#define P2_X  280
-#define P2_Y  124
-#define P3_X  40
+/* 三个目标点（屏幕坐标）。取四个角中的三个，条件数最好；
+   离边缘留 16px，躺着用拇指也能按到框内 */
+#define P1_X  24
+#define P1_Y  44
+#define P2_X  296
+#define P2_Y  44
+#define P3_X  24
 #define P3_Y  196
 
 #define SCR_W 320
 #define SCR_H 240
 
 /* 每步最多等这么久，超时说明触摸根本没反应，不能把用户困在向导里 */
-#define STEP_TIMEOUT_MS  60000
+#define STEP_TIMEOUT_MS  15000
 /* 验证阶段持续多久 */
 #define VERIFY_MS        6000
 
@@ -36,6 +37,8 @@ static touch_cal_stage_t s_stage = TOUCH_CAL_IDLE;
 static touch_cal_done_cb_t s_done_cb = NULL;
 
 static uint16_t s_raw[3][2];      /* 三个采样点的原始坐标 */
+static uint16_t s_last_raw_x;     /* 最近一次"按下期间"的原始坐标 */
+static uint16_t s_last_raw_y;
 static uint8_t  s_n;              /* 已采集点数 */
 static uint8_t  s_fail;           /* 解算失败次数 */
 static uint32_t s_stage_ms;       /* 本阶段开始时间 */
@@ -142,6 +145,7 @@ void touch_cal_start_ex(bool pressed_now)
     s_ignore_release = pressed_now;
     s_stage_ms = now_ms();
     s_last_x = s_last_y = -1;
+    s_last_raw_x = s_last_raw_y = 0;
     ESP_LOGI(TAG, "touch calibration started (pressed_now=%d), tap point 1/3", pressed_now);
 }
 
@@ -193,7 +197,7 @@ static bool solve(void)
     ESP_LOGI(TAG, "solve: u=(%.1f,%.1f) v=(%.1f,%.1f) det=%.1f", ux, uy, vx, vy, det);
 
     /* 三点几乎共线 -> 采集无效（用户点得离目标太远或面板异常） */
-    if (fabsf(det) < 500.0f) {
+    if (fabsf(det) < 5000.0f) {
         ESP_LOGE(TAG, "degenerate calibration (det too small), please retry");
         return false;
     }
@@ -293,10 +297,22 @@ bool touch_cal_feed(bool pressed, uint16_t raw_x, uint16_t raw_y)
         s_press_ms = now;
     }
 
+    /* 记录"按住期间"的坐标。
+       踩过的坑：以前直接在松开的那一刻取坐标，但手指抬起后触摸芯片
+       TD_STATUS 归零，坐标寄存器读出来是 (0,0)，于是三个采样点全是 (0,0)，
+       解出来的矩阵行列式恒为 0 —— 日志里的
+         point 1 recorded: raw=(0,0) / degenerate calibration
+       就是这个原因，校准永远不可能成功。 */
+    if (pressed) {
+        s_last_raw_x = raw_x;
+        s_last_raw_y = raw_y;
+    }
+
     if (release_edge && (now - s_press_ms) >= PRESS_MIN_MS) {
-        s_raw[s_n][0] = raw_x;
-        s_raw[s_n][1] = raw_y;
-        ESP_LOGI(TAG, "point %d recorded: raw=(%u,%u)", s_n + 1, raw_x, raw_y);
+        s_raw[s_n][0] = s_last_raw_x;
+        s_raw[s_n][1] = s_last_raw_y;
+        ESP_LOGI(TAG, "point %d recorded: raw=(%u,%u)",
+                 s_n + 1, s_last_raw_x, s_last_raw_y);
         s_n++;
 
         if (s_n >= 3) {

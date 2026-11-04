@@ -52,6 +52,7 @@ typedef enum {
     UI_BTN_VOLUME_DOWN,      /* 音量- */
     UI_BTN_FULLSCREEN,       /* 全屏 */
     UI_BTN_MOUSE_MODE,       /* 鼠标模式开关 */
+    UI_BTN_TOUCH_CAL,        /* 重新校准触摸 */
     /* 校准模式 */
     UI_BTN_CAL_NEXT,         /* 校准：下一集 */
     UI_BTN_CAL_PREV,         /* 校准：上一集 */

@@ -4,10 +4,16 @@
  *
  * 任务编排：
  *   ui_task      - 界面刷新（约 20fps）
- *   input_task   - 按键扫描 + 手势状态机
- *   touch_task   - 触摸：鼠标模式下拖动 = 移动指针；校准模式下确认
- *   imu_task     - IMU 采样与体感手势
+ *   input_task   - 实体按键 -> 鼠标左键（按下/松开直通主机）
+ *   touch_task   - 触摸：拖动 = 移动指针；点按钮 = 执行动作
  *   hid_monitor_task - 蓝牙连接状态同步
+ *
+ * 交互模型（第三版，按真机反馈收敛）：
+ *   1. 实体按键就是鼠标左键：按下发送"左键按下"，松开发送"左键松开"。
+ *      单击 / 双击 / 按住拖动全部由 macOS 自己判定，固件不猜。
+ *   2. 屏幕是触控板：任意模式空白处拖动 = 移动指针。
+ *   3. 每个功能都有屏上按钮，不依赖任何隐藏手势。
+ *   4. 体感不再参与播放控制（床上翻身误触发太多）。
  */
 #include <stdio.h>
 #include <string.h>
@@ -22,10 +28,8 @@
 #include "bsp_button.h"
 #include "bsp_imu.h"
 #include "bsp_touch.h"
-#include "button_fsm.h"
 #include "calibrate.h"
 #include "hid_device.h"
-#include "imu_gesture.h"
 #include "pointer.h"
 #include "settings.h"
 #include "touch_cal.h"
@@ -33,7 +37,7 @@
 
 static const char *TAG = "bilimouse";
 
-/* 触摸排查开关：打开后触摸期间会打印原始坐标与寄存器块 */
+/* 触摸排查开关：打开后每次按下会打印一次原始/映射坐标 */
 #define TOUCH_DEBUG 1
 
 static settings_t s_cfg;
@@ -43,19 +47,21 @@ static int  s_cal_shown_stage = -1;   /* 触摸校准界面当前展示的阶段
 /* 前向声明 */
 static void perform_action(action_t action);
 static void on_ui_button(ui_button_t btn, void *ctx);
+static void start_touch_cal(void);
 
 /* ==================== 模式切换 ==================== */
 
 static void set_mouse_mode(bool on)
 {
     s_mouse_mode = on;
+    hid_mouse_release_all();   /* 切模式时别把主机卡在"按住"状态 */
     ui_set_mode(on ? UI_MODE_MOUSE : UI_MODE_REMOTE);
     if (on) {
-        ui_show_action("鼠标模式", "屏幕拖动控制指针");
-        ui_set_footer("滑动=移动  单击=左键  双击=校准");
+        ui_show_action("鼠标模式", "全屏当触控板");
+        ui_set_footer("拖动=移动  实体键=左键");
     } else {
         ui_show_action("遥控模式", "点屏幕按钮操作");
-        ui_set_footer("点屏幕按钮，或按实体键");
+        ui_set_footer("拖动=移动  实体键=左键");
     }
 }
 
@@ -86,6 +92,9 @@ static void on_ui_button(ui_button_t btn, void *ctx)
         break;
     case UI_BTN_MOUSE_MODE:
         set_mouse_mode(!s_mouse_mode);
+        break;
+    case UI_BTN_TOUCH_CAL:
+        start_touch_cal();
         break;
 
     /* 校准模式按钮 */
@@ -146,11 +155,11 @@ static void on_touch_cal_done(bool ok)
 
     if (ok) {
         ui_show_action("触摸已校准", "点按钮试试");
-        ui_set_footer("滑动=移动  单击=左键");
+        ui_set_footer("拖动=移动  实体键=左键");
         ESP_LOGI(TAG, "touch calibration finished");
     } else {
-        ui_show_action("校准未完成", "长按实体键4秒重试");
-        ui_set_footer("长按实体键 4 秒 = 触摸校准");
+        ui_show_action("校准未完成", "点校准按钮可重做");
+        ui_set_footer("点屏幕「校准」按钮可重做");
         ESP_LOGW(TAG, "touch calibration aborted");
     }
 }
@@ -162,8 +171,8 @@ static void start_touch_cal(void)
         return;
     }
     ui_set_mode(UI_MODE_TOUCH_CAL);
-    ui_show_action("触摸校准", "按住红框中心，松开记录");
-    ui_set_footer("共 3 个点，跟着红框走");
+    ui_show_action("触摸校准", "按住红框，松手记录");
+    ui_set_footer("3 个点，跟着红框走");
     s_cal_shown_stage = 0;
     touch_cal_start_ex(false);
 }
@@ -196,94 +205,50 @@ static void touch_cal_sync_ui(void)
     }
 }
 
-/* ==================== 手势回调 ==================== */
-
-static void on_gesture(gesture_t gesture, void *ctx)
-{
-    (void)ctx;
-
-    switch (gesture) {
-    case GESTURE_SINGLE_CLICK:
-        if (s_mouse_mode) {
-            perform_action(ACTION_CLICK_LEFT);
-        } else {
-            perform_action(ACTION_NEXT_EPISODE);
-        }
-        break;
-
-    case GESTURE_DOUBLE_CLICK:
-        if (s_mouse_mode) {
-            /* 鼠标模式下双击 = 进入校准模式 */
-            if (calibrate_is_active()) {
-                calibrate_exit();
-            } else {
-                calibrate_enter();
-            }
-        } else {
-            perform_action(ACTION_PREV_EPISODE);
-        }
-        break;
-
-    case GESTURE_LONG_PRESS:
-        perform_action(ACTION_PLAY_PAUSE);
-        break;
-
-    case GESTURE_SUPER_LONG:
-        /* 超长按：切换鼠标模式 */
-        set_mouse_mode(!s_mouse_mode);
-        ESP_LOGI(TAG, "mouse mode: %s", s_mouse_mode ? "on" : "off");
-        break;
-
-    case GESTURE_ULTRA_LONG:
-        /* 4 秒长按：随时重做触摸校准（不依赖触摸本身是否可用） */
-        start_touch_cal();
-        break;
-
-    case GESTURE_HOLD_START:
-        /* 按住提示：告诉用户松手会发生什么（动作尚未执行） */
-        if (s_mouse_mode) {
-            ui_show_hint("松开 = 进入校准模式");
-        } else {
-            ui_show_hint("松开 = 播放/暂停");
-        }
-        break;
-
-    case GESTURE_HOLD_SUPER:
-        ui_show_hint("松开 = 切换鼠标模式");
-        break;
-
-    case GESTURE_HOLD_ULTRA:
-        ui_show_hint("松开 = 重新触摸校准");
-        break;
-
-    default:
-        break;
-    }
-}
-
 /* ==================== 任务 ==================== */
 
+/**
+ * 实体按键任务：把一个普通轻触按键变成真正的鼠标左键。
+ *
+ * 为什么不做手势识别？
+ *   以前是「单击=下一集 / 双击=上一集 / 长按=播放暂停」，需要固件自己计时判断，
+ *   结果三个问题一起出现：双击窗口和系统不一致、长按和拖动打架、
+ *   而用户真正想要的只是「当鼠标用」。
+ *
+ * 现在的做法：按下就发 left-button-down，松开发 left-button-up。
+ *   单击、双击、三击、按住拖动、框选，全部由 macOS 自己按系统设置判定，
+ *   行为和一只有线鼠标完全一致，不存在"设备以为双击了、系统以为是两次单击"。
+ */
 static void input_task(void *arg)
 {
     (void)arg;
-    fsm_config_t fsm_cfg = {
-        .click_max_ms        = 250,
-        .double_click_gap_ms = 300,
-        .long_press_ms       = s_cfg.long_press_ms,
-        .super_long_press_ms = s_cfg.super_long_press_ms,
-        .ultra_long_press_ms = s_cfg.ultra_long_press_ms ? s_cfg.ultra_long_press_ms : 4000,
-    };
-    button_fsm_init(&fsm_cfg, on_gesture, NULL);
 
-    bsp_button_state_t last = bsp_button_get_state();
+    bool last = (bsp_button_get_state() == BSP_BUTTON_PRESSED);
+    bool ready_warned = false;
+
+    /* 上电时 GPIO0 常被外部拉低（进入下载模式的那颗 strapping 脚），
+       先等它稳定松开，避免一开机就给主机发一次"左键按下"，光标卡住。 */
+    vTaskDelay(pdMS_TO_TICKS(120));
+    last = (bsp_button_get_state() == BSP_BUTTON_PRESSED);
+
     while (1) {
-        bsp_button_state_t st = bsp_button_get_state();
-        if (st != last) {
-            last = st;
-            button_fsm_update(st == BSP_BUTTON_PRESSED,
-                               (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS));
+        bool now = (bsp_button_get_state() == BSP_BUTTON_PRESSED);
+
+        if (now != last) {
+            last = now;
+
+            if (!hid_device_is_ready()) {
+                if (!ready_warned) {
+                    ready_warned = true;
+                    ui_show_hint("蓝牙未就绪，按键暂不可用");
+                }
+            } else {
+                ready_warned = false;
+                if (hid_mouse_button(HID_MOUSE_BTN_LEFT, now) == ESP_OK) {
+                    ESP_LOGD(TAG, "mouse left button %s", now ? "down" : "up");
+                }
+            }
         }
-        button_fsm_tick((uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS));
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
@@ -291,14 +256,18 @@ static void input_task(void *arg)
 /**
  * 触摸任务
  *
- * 交互模型（重构后的核心）：
+ * 交互模型：
  *   - 屏幕本身就是触控板：任何模式下，**在空白处拖动 = 移动主机鼠标指针**
- *   - 遥控模式：屏幕上直接显示大按钮，点按钮 = 执行对应动作
- *   - 鼠标模式：全屏无按钮，纯触控板；实体键单击 = 左键
- *   - 校准模式：显示「校准下一集 / 校准上一集 / 完成」三个大按钮
+ *   - 遥控模式：屏幕上直接显示按钮，点按钮 = 执行对应动作
+ *   - 鼠标模式：全屏纯触控板（右下角保留一个「遥控」小按钮，否则进去就出不来）
+ *   - 触摸校准：只有主动点「校准」按钮才会进入，且向导自己独占触摸
  *
  * 区分「点击按钮」与「拖动指针」：按下时先做命中测试，
  * 命中按钮则本次触摸不产生指针移动；未命中则按触控板处理。
+ *
+ * ⚠️ 曾经有一个致命交互 bug：未校准时「任何一次触摸都把校准向导叫回来」，
+ *    于是用户一碰屏幕，界面就跳到校准向导，所有按钮消失、鼠标也拖不动。
+ *    现在校准只由「校准」按钮触发，不会再抢触摸。
  */
 static void touch_task(void *arg)
 {
@@ -310,21 +279,10 @@ static void touch_task(void *arg)
     int16_t last_x = 0, last_y = 0;
     uint32_t press_ms = 0;
     uint32_t moved = 0;
-#if TOUCH_DEBUG
-    uint32_t last_dump = 0;
-#endif
 
     while (1) {
-        uint32_t loop_now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
         if (bsp_touch_read(&t) == ESP_OK) {
-#if TOUCH_DEBUG
-            if (t.pressed && (loop_now - last_dump) > 400) {
-                last_dump = loop_now;
-                ESP_LOGW(TAG, "touch raw=(%u,%u)", t.raw_x, t.raw_y);
-                bsp_touch_dump();
-            }
-#endif
-            /* ---- 校准向导独占触摸 ---- */
+            /* ---- 校准向导独占触摸（仅在用户主动进入时） ---- */
             if (touch_cal_feed(t.pressed, t.raw_x, t.raw_y)) {
                 touch_cal_sync_ui();
 
@@ -348,18 +306,6 @@ static void touch_task(void *arg)
                 continue;
             }
 
-            /* ---- 还没校准过：任何一次触摸都用来把向导叫回来 ---- */
-            if (!touch_cal_is_calibrated() && !touch_cal_is_active() && t.pressed) {
-                ui_set_mode(UI_MODE_TOUCH_CAL);
-                ui_show_action("触摸校准", "按住红框中心，松开记录");
-                ui_set_footer("共 3 个点，跟着红框走");
-                s_cal_shown_stage = 0;
-                touch_cal_start_ex(true);
-                was_pressed = true;
-                vTaskDelay(pdMS_TO_TICKS(20));
-                continue;
-            }
-
             /* ---- 正常交互：原始坐标 -> 屏幕坐标 ---- */
             uint16_t sx = 0, sy = 0;
             touch_cal_map(t.raw_x, t.raw_y, &sx, &sy);
@@ -374,6 +320,10 @@ static void touch_task(void *arg)
                     last_y = (int16_t)sy;
                     press_ms = now;
                     moved = 0;
+#if TOUCH_DEBUG
+                    ESP_LOGI(TAG, "touch raw=(%u,%u) -> (%u,%u) btn=%d",
+                             t.raw_x, t.raw_y, sx, sy, (int)pressed_btn);
+#endif
                 } else if (!on_button) {
                     /* 拖动中（仅空白区）：移动主机指针 */
                     int16_t dx = (int16_t)(sx - last_x);
@@ -396,12 +346,17 @@ static void touch_task(void *arg)
                 was_pressed = false;
 
                 if (on_button && pressed_btn != UI_BTN_NONE) {
-                    /* 点击了按钮：执行对应动作 */
-                    on_ui_button(pressed_btn, NULL);
+                    /* 「鼠标」按钮长按 = 触摸校准：触摸不正常时这是唯一
+                       还能进校准的入口，所以绑在一个大按钮上而不是藏菜单 */
+                    if (pressed_btn == UI_BTN_MOUSE_MODE &&
+                        moved < 12 && (now - press_ms) >= 1500) {
+                        start_touch_cal();
+                    } else {
+                        /* 点击了按钮：执行对应动作 */
+                        on_ui_button(pressed_btn, NULL);
+                    }
                 } else if (s_mouse_mode && moved < 12 && (now - press_ms) < 400) {
-                    /* 鼠标模式下轻点空白处 = 左键单击。
-                       之前只认屏幕按钮，轻点什么都不做，
-                       用户看到"单击=左键"的提示却点不出反应。 */
+                    /* 鼠标模式下轻点空白处 = 左键单击 */
                     perform_action(ACTION_CLICK_LEFT);
                 }
                 on_button = false;
@@ -409,37 +364,6 @@ static void touch_task(void *arg)
             }
         }
         vTaskDelay(pdMS_TO_TICKS(20));
-    }
-}
-
-static void imu_task(void *arg)
-{
-    (void)arg;
-    bsp_imu_data_t data;
-
-    vTaskDelay(pdMS_TO_TICKS(500));
-
-    while (1) {
-        if (bsp_imu_read(&data) == ESP_OK) {
-            imu_gesture_t g = imu_gesture_process(&data);
-            if (g != IMU_GESTURE_NONE && hid_device_is_ready()) {
-                action_t action = ACTION_MAX;
-                switch (g) {
-                case IMU_GESTURE_SHAKE:       action = ACTION_FAST_FORWARD_10S; break;
-                case IMU_GESTURE_FLIP:        action = ACTION_PLAY_PAUSE;      break;
-                case IMU_GESTURE_TILT_LEFT:   action = ACTION_VOLUME_DOWN;     break;
-                case IMU_GESTURE_TILT_RIGHT:  action = ACTION_VOLUME_UP;       break;
-                default: break;
-                }
-                if (action != ACTION_MAX) {
-                    action_ctx_t actx = { 0 };
-                    if (action_execute(action, &actx) == ESP_OK) {
-                        ui_show_action(action_label(action), "体感触发");
-                    }
-                }
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(20));   /* 50Hz 采样 */
     }
 }
 
@@ -478,7 +402,7 @@ static void hid_monitor_task(void *arg)
             switch (st) {
             case UI_CONN_CONNECTED:
                 ui_show_action("已连接", "点屏幕按钮即可操作");
-                ui_set_footer("点屏幕按钮，或按实体键");
+                ui_set_footer("实体键 = 鼠标左键");
                 break;
             case UI_CONN_PAIRING:
                 /* 区分「主机未订阅」与「还没配好」，给出可操作的提示 */
@@ -540,7 +464,6 @@ void app_main(void)
 
     settings_load(&s_cfg);
     touch_cal_init(on_touch_cal_done);
-    imu_gesture_init(s_cfg.sensitivity);
     pointer_init();
     calibrate_init();
 
@@ -579,17 +502,12 @@ void app_main(void)
     xTaskCreate(input_task, "input_task", 4096, NULL, 5, NULL);
     if (touch_ok) {
         xTaskCreate(touch_task, "touch_task", 4096, NULL, 4, NULL);
-        /* 首次开机强制做一次触摸校准：坐标方向因面板装配而异，
-           不校准的话"点哪儿都不准"是必然的 */
-        if (!touch_cal_is_calibrated()) {
-            vTaskDelay(pdMS_TO_TICKS(300));
-            start_touch_cal();
-        }
     }
     xTaskCreate(hid_monitor_task, "hid_task", 3072, NULL, 4, NULL);
-    if (bsp_imu_probe()) {
-        xTaskCreate(imu_task, "imu_task", 4096, NULL, 4, NULL);
-    }
+
+    /* 体感（甩腕/翻转）已停用：躺在床上翻身、拿放设备都会误触发，
+       实测「暂停/播放」被打断的次数远多于主动使用的次数。
+       IMU 仍然初始化，后续要恢复体感功能时只需把 imu_task 加回来。 */
 
     ESP_LOGI(TAG, "startup complete");
 }

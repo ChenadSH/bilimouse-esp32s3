@@ -11,10 +11,13 @@
 用法: python tools/gen_font.py
 """
 import os
+import re
 from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.join(os.path.dirname(HERE), "main", "ui")
+PROJECT = os.path.dirname(HERE)
+OUT_DIR = os.path.join(PROJECT, "main", "ui")
+SRC_DIR = os.path.join(PROJECT, "main")
 
 # ---- 字体资源 ----
 CJK_FONT = r"C:\Windows\Fonts\msyhbd.ttc"    # 微软雅黑 Bold
@@ -26,7 +29,7 @@ ASCII_W = 8
 CJK_W = 16
 GLYPH_H = 16
 
-# UI 中实际使用的中文字符（按界面文案收敛，避免字库膨胀）
+# 兜底字符集（即使源码扫描漏了，这些也必须有）
 CJK_CHARS = (
     "下一集上一集播放暂停音量快进后退倍速全屏弹幕静音"
     "校准完成失败未连接已连接配对中请稍候鼠标模式遥控器体感"
@@ -35,6 +38,35 @@ CJK_CHARS = (
     "动作触发切集选集单多视频网页播放器主菜单返回首页进度时长"
     "已配对无信号蓝牙已断开重连中切集成功"
 )
+
+# 源码里出现但字库没有 -> 屏幕上显示成 '?'，这是「一大堆问号」的根因。
+# 直接从 main/ 下所有 C 源码的字符串字面量里收集汉字与全角标点，
+# 保证「代码里写了什么，字库里就有什么」，不会再漏。
+STR_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
+CJK_RANGES = (
+    (0x4E00, 0x9FFF),   # 常用汉字
+    (0x3000, 0x303F),   # 中文标点
+    (0xFF00, 0xFFEF),   # 全角字符
+)
+
+
+def collect_chars_from_source():
+    chars = set()
+    for root, _dirs, files in os.walk(SRC_DIR):
+        for name in files:
+            if not name.endswith((".c", ".h")):
+                continue
+            path = os.path.join(root, name)
+            if os.path.abspath(path) == os.path.abspath(os.path.join(OUT_DIR, "ui_font.c")):
+                continue
+            with open(path, encoding="utf-8", errors="ignore") as fh:
+                text = fh.read()
+            for lit in STR_RE.findall(text):
+                for ch in lit:
+                    cp = ord(ch)
+                    if any(lo <= cp <= hi for lo, hi in CJK_RANGES):
+                        chars.add(ch)
+    return chars
 
 # ASCII 全量 0x20~0x7E，保证固件侧可直接下标寻址
 ASCII_FIRST = 0x20
@@ -97,7 +129,12 @@ def main():
     cjk_font = ImageFont.truetype(CJK_FONT, CJK_SIZE)
     ascii_font = ImageFont.truetype(ASCII_FONT, ASCII_SIZE)
 
-    cjk_table = build_table(CJK_CHARS, cjk_font, CJK_W, CJK_SIZE)
+    cjk_set = set(CJK_CHARS) | collect_chars_from_source()
+    # 空格之类的不可见字符不需要点阵
+    cjk_set = {c for c in cjk_set if not c.isspace()}
+    print(f"[gen_font] collected {len(cjk_set)} CJK chars from source")
+
+    cjk_table = build_table(cjk_set, cjk_font, CJK_W, CJK_SIZE)
     ascii_table = build_table(ASCII_CHARS, ascii_font, ASCII_W, ASCII_SIZE)
 
     cjk_order = sorted(cjk_table.keys(), key=ord)

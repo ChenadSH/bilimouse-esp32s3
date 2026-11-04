@@ -54,9 +54,9 @@ typedef struct {
 /* 遥控模式按钮：主按钮行（三个大按钮，横向均分 320px） */
 #define MAIN_BTN_Y      96
 #define MAIN_BTN_H      64
-/* 次按钮行（四个按钮） */
-#define SUB_BTN_Y       164
-#define SUB_BTN_H       50
+/* 次按钮行（五个按钮，横向均分 320px） */
+#define SUB_BTN_Y       160
+#define SUB_BTN_H       54
 
 static const btn_def_t s_main_btns[] = {
     { UI_BTN_PREV_EPISODE,   6,  MAIN_BTN_Y, 100, MAIN_BTN_H, "上一集", COL_ACCENT },
@@ -67,13 +67,22 @@ static const btn_def_t s_main_btns[] = {
 #define MAIN_BTN_CNT  (sizeof(s_main_btns) / sizeof(s_main_btns[0]))
 
 static const btn_def_t s_sub_btns[] = {
-    { UI_BTN_VOLUME_DOWN,   6,  SUB_BTN_Y, 74, SUB_BTN_H, "音量-", COL_SUBTEXT },
-    { UI_BTN_VOLUME_UP,    84,  SUB_BTN_Y, 74, SUB_BTN_H, "音量+", COL_SUBTEXT },
-    { UI_BTN_FULLSCREEN,  162,  SUB_BTN_Y, 74, SUB_BTN_H, "全屏", COL_SUBTEXT },
-    { UI_BTN_MOUSE_MODE,   240,  SUB_BTN_Y, 74, SUB_BTN_H, "鼠标", COL_SUBTEXT },
+    { UI_BTN_VOLUME_DOWN,   4,  SUB_BTN_Y, 60, SUB_BTN_H, "音量-", COL_SUBTEXT },
+    { UI_BTN_VOLUME_UP,    68,  SUB_BTN_Y, 60, SUB_BTN_H, "音量+", COL_SUBTEXT },
+    { UI_BTN_FULLSCREEN,  132,  SUB_BTN_Y, 60, SUB_BTN_H, "全屏",  COL_SUBTEXT },
+    { UI_BTN_MOUSE_MODE,  196,  SUB_BTN_Y, 60, SUB_BTN_H, "鼠标",  COL_SUBTEXT },
+    { UI_BTN_TOUCH_CAL,   260,  SUB_BTN_Y, 56, SUB_BTN_H, "校准",  COL_SUBTEXT },
 };
 
 #define SUB_BTN_CNT  (sizeof(s_sub_btns) / sizeof(s_sub_btns[0]))
+
+/* 鼠标模式下的「返回遥控」小按钮：全屏触控板时必须留一个出口，
+   否则切进鼠标模式就再也点不到任何按钮了。 */
+static const btn_def_t s_float_btns[] = {
+    { UI_BTN_MOUSE_MODE, 240, 166, 74, 44, "遥控", COL_ACCENT },
+};
+
+#define FLOAT_BTN_CNT (sizeof(s_float_btns) / sizeof(s_float_btns[0]))
 
 /* 校准模式按钮：两个大按钮 + 一个完成 */
 #define CAL_BTN_Y      110
@@ -384,8 +393,10 @@ static void redraw(void)
     } else if (s_mode == UI_MODE_REMOTE) {
         draw_btn_group(s_main_btns, MAIN_BTN_CNT);
         draw_btn_group(s_sub_btns, SUB_BTN_CNT);
+    } else {
+        /* 鼠标模式：整个屏幕都是触控板，只留一个返回遥控的出口 */
+        draw_btn_group(s_float_btns, FLOAT_BTN_CNT);
     }
-    /* 鼠标模式不画按钮：整个屏幕都是触控板 */
 
     draw_footer();
 
@@ -422,8 +433,8 @@ ui_button_t ui_hit_test(uint16_t x, uint16_t y)
         }
         return hit_group(s_sub_btns, SUB_BTN_CNT, x, y);
     }
-    /* 鼠标模式：屏幕整体是触控板，无按钮 */
-    return UI_BTN_NONE;
+    /* 鼠标模式：屏幕整体是触控板，只保留右下角的「遥控」出口 */
+    return hit_group(s_float_btns, FLOAT_BTN_CNT, x, y);
 }
 
 /* ==================== 对外接口 ==================== */

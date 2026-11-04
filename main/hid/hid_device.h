@@ -59,6 +59,22 @@ esp_err_t hid_mouse_scroll(int8_t wheel);
 /** 发送鼠标按键点击（按下 + 释放） */
 esp_err_t hid_mouse_click(uint8_t button);
 
+/**
+ * 按住 / 松开鼠标按键（不自动释放）。
+ *
+ * 实体按键走这条路径，等价于一只真正的鼠标左键：
+ * 单击、双击、按住拖动全部由主机系统判定。
+ */
+esp_err_t hid_mouse_button(uint8_t button, bool down);
+
+/** 释放所有鼠标按键（断连或切模式时兜底） */
+void hid_mouse_release_all(void);
+
+/** 鼠标按键位定义（与 HID 报告 byte0 一致） */
+#define HID_MOUSE_BTN_LEFT    0x01
+#define HID_MOUSE_BTN_RIGHT   0x02
+#define HID_MOUSE_BTN_MIDDLE  0x04
+
 /* ---------------- 键盘 ---------------- */
 
 /** HID 修饰键 */

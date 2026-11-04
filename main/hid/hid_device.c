@@ -44,6 +44,7 @@ static bool     s_secure = false;         /* 已完成加密配对 */
 static bool     s_connected = false;
 static bool     s_report_enabled = false; /* 主机已订阅输入报告(CCCD) */
 static hid_conn_state_t s_state = HID_STATE_IDLE;
+static uint8_t  s_btn_mask = 0;           /* 当前按住的鼠标按键（左/右/中） */
 
 static esp_bd_addr_t s_peer_bda;          /* 当前/最近连接的对方地址 */
 static uint32_t s_connect_ms = 0;         /* 连接建立时刻，用于配对超时 */
@@ -450,9 +451,45 @@ esp_err_t hid_mouse_move(int8_t dx, int8_t dy)
     if (!hid_device_is_ready()) {
         return ESP_ERR_INVALID_STATE;
     }
-    mouse_cmd_t cmd = 0;
-    esp_hidd_send_mouse_value(s_conn_id, cmd, dx, dy);
+    /* 带上当前按住的按键状态：否则拖动时主机认为按键已松开，
+       表现为「按住拖不动 / 拖到一半选中被取消」。 */
+    esp_hidd_send_mouse_value(s_conn_id, s_btn_mask, dx, dy);
     return ESP_OK;
+}
+
+/**
+ * 按住 / 松开鼠标按键（不自动释放）。
+ *
+ * 这是把实体按键当成真实鼠标左键的关键：
+ *   - 按下 -> 主机立即收到「左键按下」，可以开始框选、拖动窗口
+ *   - 松开 -> 主机收到「左键松开」
+ * 单击 / 双击 / 连击全部交给主机的系统级判定，不需要固件自己计时，
+ * 也就不会出现「双击窗口设得太短点不出来」的问题。
+ */
+esp_err_t hid_mouse_button(uint8_t button, bool down)
+{
+    if (!hid_device_is_ready()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (down) {
+        s_btn_mask |= button;
+    } else {
+        s_btn_mask &= (uint8_t)~button;
+    }
+    esp_hidd_send_mouse_value(s_conn_id, s_btn_mask, 0, 0);
+    return ESP_OK;
+}
+
+/** 释放所有按键（断连/切模式时兜底，避免主机卡在"按下"状态） */
+void hid_mouse_release_all(void)
+{
+    if (s_btn_mask == 0) {
+        return;
+    }
+    s_btn_mask = 0;
+    if (hid_device_is_ready()) {
+        esp_hidd_send_mouse_value(s_conn_id, 0, 0, 0);
+    }
 }
 esp_err_t hid_mouse_scroll(int8_t wheel)
 {
