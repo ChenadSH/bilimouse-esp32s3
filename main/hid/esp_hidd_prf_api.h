@@ -162,6 +162,19 @@ void esp_hidd_send_keyboard_value(uint16_t conn_id, key_mask_t special_key_mask,
 
 void esp_hidd_send_mouse_value(uint16_t conn_id, uint8_t mouse_button, int8_t mickeys_x, int8_t mickeys_y);
 
+/**
+ * @brief 通知应用层：主机是否已订阅输入报告
+ *
+ * BiliMouse 扩展。主机写 CCCD 开启通知时会回调此函数。
+ * 未订阅时发送的输入报告不会被主机接收，是「连上却无输入」的常见原因。
+ */
+void esp_hidd_report_notify_status(bool enabled);
+
+/**
+ * @brief 注册「主机订阅状态」回调（BiliMouse 扩展）
+ */
+void esp_hidd_register_report_notify_cb(void (*cb)(bool enabled));
+
 #ifdef __cplusplus
 }
 #endif

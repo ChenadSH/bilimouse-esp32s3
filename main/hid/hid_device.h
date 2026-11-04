@@ -33,8 +33,11 @@ esp_err_t hid_device_init(void);
 /** 当前连接状态 */
 hid_conn_state_t hid_device_state(void);
 
-/** 是否可以发送 HID 报告（已连接且已加密） */
+/** 是否可以发送 HID 报告（已连接 + 已加密 + 主机已订阅） */
 bool hid_device_is_ready(void);
+
+/** 主机是否已订阅输入报告（用于屏幕上的诊断提示） */
+bool hid_device_report_enabled(void);
 
 /* ---------------- 鼠标 ---------------- */
 

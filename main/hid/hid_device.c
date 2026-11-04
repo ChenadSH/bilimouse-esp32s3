@@ -41,12 +41,21 @@ static const char *TAG = "hid_device";
 static uint16_t s_conn_id = 0;
 static bool     s_secure = false;       /* 已完成加密配对 */
 static bool     s_connected = false;
+static bool     s_report_enabled = false; /* 主机已订阅输入报告(CCCD) */
 static hid_conn_state_t s_state = HID_STATE_IDLE;
 
 /* ================= 广播数据 ================= */
-static uint8_t hidd_service_uuid128[] = {
-    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x12, 0x18, 0x00, 0x00,
-};
+/*
+ * 广播包总长上限 31 字节，字段写入顺序为：
+ *   flags(3) -> appearance(4) -> name(N+2) -> txpower(3) -> service_uuid
+ *
+ * 这里用 **16 位** HID 服务 UUID (0x1812) 而不是 128 位：
+ *   128 位版本占 18 字节，减去名字后必然放不下 ->
+ *   UUID 被截断成 0 长度，macOS / iOS 扫描时无法识别这是 HID 设备，
+ *   表现为「能连上但收不到任何输入报告」。
+ *   16 位版本只占 4 字节，是 BLE HID 规范（HID over GATT）的标准做法。
+ */
+static uint16_t hidd_service_uuid16 = ESP_GATT_UUID_HID_SVC;   /* 0x1812 */
 
 static esp_ble_adv_data_t s_adv_data = {
     .set_scan_rsp = false,
@@ -59,8 +68,8 @@ static esp_ble_adv_data_t s_adv_data = {
     .p_manufacturer_data = NULL,
     .service_data_len = 0,
     .p_service_data = NULL,
-    .service_uuid_len = sizeof(hidd_service_uuid128),
-    .p_service_uuid = hidd_service_uuid128,
+    .service_uuid_len = sizeof(hidd_service_uuid16),
+    .p_service_uuid = (uint8_t *)&hidd_service_uuid16,
     .flag = 0x6,
 };
 
@@ -74,6 +83,18 @@ static esp_ble_adv_params_t s_adv_params = {
 };
 
 /* ================= 事件回调 ================= */
+
+/** 主机订阅输入报告状态变化 */
+static void on_report_notify(bool enabled)
+{
+    s_report_enabled = enabled;
+    ESP_LOGI(TAG, "host input report notification %s", enabled ? "ENABLED" : "disabled");
+    /* 订阅就绪后状态才真正变为 READY */
+    if (enabled && s_connected && s_secure) {
+        s_state = HID_STATE_READY;
+    }
+}
+
 static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *param)
 {
     switch (event) {
@@ -93,6 +114,7 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
         s_conn_id = param->connect.conn_id;
         s_connected = true;
         s_secure = false;
+        s_report_enabled = false;
         s_state = HID_STATE_CONNECTING;
         break;
 
@@ -100,6 +122,7 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
         ESP_LOGI(TAG, "BLE disconnected, restarting advertising");
         s_connected = false;
         s_secure = false;
+        s_report_enabled = false;
         s_state = HID_STATE_ADVERTISING;
         esp_ble_gap_start_advertising(&s_adv_params);
         break;
@@ -136,6 +159,17 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
                      param->ble_security.auth_cmpl.fail_reason);
             s_secure = false;
         }
+        break;
+
+    case ESP_GAP_BLE_PASSKEY_REQ_EVT:
+        /* 主机请求 PIN —— Just Works 模式下不会走到这里，兜底拒绝即可 */
+        ESP_LOGW(TAG, "passkey requested by host, declining");
+        esp_ble_passkey_reply(param->ble_security.ble_req.bd_addr, false, 0);
+        break;
+
+    case ESP_GAP_BLE_PASSKEY_NOTIF_EVT:
+        /* 主机发来 passkey 供比对（MITM 模式）。Just Works 不走这里。 */
+        ESP_LOGW(TAG, "passkey notification received");
         break;
 
     default:
@@ -191,9 +225,14 @@ esp_err_t hid_device_init(void)
 
     esp_ble_gap_register_callback(gap_event_handler);
     esp_hidd_register_callbacks(hidd_event_callback);
+    esp_hidd_register_report_notify_cb(on_report_notify);
 
-    /* 配对参数：无输入无输出 IO 能力（Windows 下自动接受配对） */
-    esp_ble_auth_req_t auth_req = ESP_LE_AUTH_BOND;
+    /* 配对参数。
+     * 必须带 ESP_LE_AUTH_REQ_SC_ONLY（Secure Connections）——
+     * Apple 设备（macOS / iOS）强制要求 LE SC，只用 Legacy Pairing
+     * (ESP_LE_AUTH_BOND) 会导致能连接但配对不完成、输入报告发不出去。
+     * ESP_IO_CAP_NONE = 无输入输出能力 -> 走 Just Works，免 PIN 码。 */
+    esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_BOND;
     esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;
     uint8_t key_size = 16;
     uint8_t init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
@@ -214,9 +253,26 @@ hid_conn_state_t hid_device_state(void)
     return s_state;
 }
 
+/**
+ * 是否可以发送 HID 报告。
+ *
+ * 判定条件（三者都要满足）：
+ *   1. 已连接
+ *   2. 链路已加密（macOS 强制要求 LE SC）
+ *   3. 主机已订阅输入报告（CCCD 已使能）
+ *
+ * 只满足 1、2 时主机仍可能收不到报告 —— 那是「连上了却没反应」的
+ * 最隐蔽的一种情况，单独用 s_report_enabled 把它区分出来。
+ */
 bool hid_device_is_ready(void)
 {
-    return s_connected && s_secure;
+    return s_connected && s_secure && s_report_enabled;
+}
+
+/** 主机是否已订阅输入报告（用于屏幕上的诊断提示） */
+bool hid_device_report_enabled(void)
+{
+    return s_report_enabled;
 }
 
 /* ================= 鼠标 ================= */

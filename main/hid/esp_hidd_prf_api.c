@@ -132,3 +132,19 @@ void esp_hidd_send_mouse_value(uint16_t conn_id, uint8_t mouse_button, int8_t mi
                         HID_RPT_ID_MOUSE_IN, HID_REPORT_TYPE_INPUT, HID_MOUSE_IN_RPT_LEN, buffer);
     return;
 }
+
+/* BiliMouse 扩展：把「主机已订阅输入报告」的状态上报给应用层 */
+static void (*s_report_notify_cb)(bool enabled) = NULL;
+
+void esp_hidd_register_report_notify_cb(void (*cb)(bool enabled))
+{
+    s_report_notify_cb = cb;
+}
+
+void esp_hidd_report_notify_status(bool enabled)
+{
+    ESP_LOGI(HID_LE_PRF_TAG, "host report notification %s", enabled ? "enabled" : "disabled");
+    if (s_report_notify_cb) {
+        s_report_notify_cb(enabled);
+    }
+}

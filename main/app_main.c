@@ -34,6 +34,70 @@ static const char *TAG = "bilimouse";
 static settings_t s_cfg;
 static bool s_mouse_mode = false;
 
+/* 前向声明 */
+static void perform_action(action_t action);
+static void on_ui_button(ui_button_t btn, void *ctx);
+
+/* ==================== 模式切换 ==================== */
+
+static void set_mouse_mode(bool on)
+{
+    s_mouse_mode = on;
+    ui_set_mode(on ? UI_MODE_MOUSE : UI_MODE_REMOTE);
+    if (on) {
+        ui_show_action("鼠标模式", "屏幕拖动控制指针");
+        ui_set_footer("滑动=移动  单击=左键  双击=校准");
+    } else {
+        ui_show_action("遥控模式", "点屏幕按钮操作");
+        ui_set_footer("点屏幕按钮，或按实体键");
+    }
+}
+
+/* ==================== 屏幕按钮回调 ==================== */
+
+static void on_ui_button(ui_button_t btn, void *ctx)
+{
+    (void)ctx;
+
+    switch (btn) {
+    case UI_BTN_PREV_EPISODE:
+        perform_action(ACTION_PREV_EPISODE);
+        break;
+    case UI_BTN_NEXT_EPISODE:
+        perform_action(ACTION_NEXT_EPISODE);
+        break;
+    case UI_BTN_PLAY_PAUSE:
+        perform_action(ACTION_PLAY_PAUSE);
+        break;
+    case UI_BTN_VOLUME_UP:
+        perform_action(ACTION_VOLUME_UP);
+        break;
+    case UI_BTN_VOLUME_DOWN:
+        perform_action(ACTION_VOLUME_DOWN);
+        break;
+    case UI_BTN_FULLSCREEN:
+        perform_action(ACTION_FULLSCREEN);
+        break;
+    case UI_BTN_MOUSE_MODE:
+        set_mouse_mode(!s_mouse_mode);
+        break;
+
+    /* 校准模式按钮 */
+    case UI_BTN_CAL_NEXT:
+        calibrate_select_target(CAL_TARGET_NEXT);
+        break;
+    case UI_BTN_CAL_PREV:
+        calibrate_select_target(CAL_TARGET_PREV);
+        break;
+    case UI_BTN_CAL_EXIT:
+        calibrate_exit();
+        break;
+
+    default:
+        break;
+    }
+}
+
 /* ==================== 动作执行 ==================== */
 
 static void perform_action(action_t action)
@@ -100,15 +164,7 @@ static void on_gesture(gesture_t gesture, void *ctx)
 
     case GESTURE_SUPER_LONG:
         /* 超长按：切换鼠标模式 */
-        s_mouse_mode = !s_mouse_mode;
-        ui_set_mode(s_mouse_mode ? UI_MODE_MOUSE : UI_MODE_REMOTE);
-        if (s_mouse_mode) {
-            ui_show_action("鼠标模式", "屏幕滑动控制指针");
-            ui_set_footer("滑动=移动  单击=左键  双击=滚轮");
-        } else {
-            ui_show_action("遥控模式", "单击下一集 双击上一集");
-            ui_set_footer("单击下一集  双击上一集  长按播放/暂停");
-        }
+        set_mouse_mode(!s_mouse_mode);
         ESP_LOGI(TAG, "mouse mode: %s", s_mouse_mode ? "on" : "off");
         break;
 
@@ -157,57 +213,59 @@ static void input_task(void *arg)
 }
 
 /**
- * 触摸任务：
- *   校准模式 - 点击按钮 = 选择要校准的目标 / 确认 / 退出
- *   鼠标模式 - 拖动 = 相对移动鼠标指针（触控板体验）
- *   遥控模式 - 点击 = 快捷动作（下一集 / 播放暂停）
+ * 触摸任务
+ *
+ * 交互模型（重构后的核心）：
+ *   - 屏幕本身就是触控板：任何模式下，**在空白处拖动 = 移动主机鼠标指针**
+ *   - 遥控模式：屏幕上直接显示大按钮，点按钮 = 执行对应动作
+ *   - 鼠标模式：全屏无按钮，纯触控板；实体键单击 = 左键
+ *   - 校准模式：显示「校准下一集 / 校准上一集 / 完成」三个大按钮
+ *
+ * 区分「点击按钮」与「拖动指针」：按下时先做命中测试，
+ * 命中按钮则本次触摸不产生指针移动；未命中则按触控板处理。
  */
 static void touch_task(void *arg)
 {
     (void)arg;
     bsp_touch_data_t t;
     bool was_pressed = false;
+    bool on_button = false;      /* 本次触摸是否落在按钮上 */
+    ui_button_t pressed_btn = UI_BTN_NONE;
     int16_t last_x = 0, last_y = 0;
 
     while (1) {
         if (bsp_touch_read(&t) == ESP_OK) {
             if (t.pressed) {
                 if (!was_pressed) {
-                    /* 触摸开始 */
+                    /* 触摸开始：判定是否落在按钮上 */
+                    pressed_btn = ui_hit_test(t.x, t.y);
+                    on_button = (pressed_btn != UI_BTN_NONE);
                     last_x = (int16_t)t.x;
                     last_y = (int16_t)t.y;
-                } else {
-                    /* 拖动中 */
+                } else if (!on_button) {
+                    /* 拖动中（仅空白区）：移动主机指针 */
                     int16_t dx = (int16_t)(t.x - last_x);
                     int16_t dy = (int16_t)(t.y - last_y);
-                    if (dx || dy) {
-                        /* 鼠标模式与校准模式下，滑动都用于移动主机指针 */
-                        if ((s_mouse_mode || calibrate_is_active()) && hid_device_is_ready()) {
-                            int8_t mdx = (dx > 127) ? 127 : ((dx < -127) ? -127 : (int8_t)dx);
-                            int8_t mdy = (dy > 127) ? 127 : ((dy < -127) ? -127 : (int8_t)dy);
-                            hid_mouse_move(mdx, mdy);
-                            pointer_track(mdx, mdy);
-                        }
-                        last_x = (int16_t)t.x;
-                        last_y = (int16_t)t.y;
+                    if ((dx || dy) && hid_device_is_ready()) {
+                        int8_t mdx = (dx > 127) ? 127 : ((dx < -127) ? -127 : (int8_t)dx);
+                        int8_t mdy = (dy > 127) ? 127 : ((dy < -127) ? -127 : (int8_t)dy);
+                        hid_mouse_move(mdx, mdy);
+                        pointer_track(mdx, mdy);
                     }
+                    last_x = (int16_t)t.x;
+                    last_y = (int16_t)t.y;
                 }
                 was_pressed = true;
             } else if (was_pressed) {
                 /* 触摸结束 */
                 was_pressed = false;
 
-                if (calibrate_is_active()) {
-                    /* 校准界面：点击按钮 */
-                    calibrate_on_touch(t.x, t.y);
-                } else if (!s_mouse_mode && hid_device_is_ready()) {
-                    /* 遥控模式：屏幕下半区点击 = 切换下一集，上半区 = 播放/暂停 */
-                    if (t.y > 120) {
-                        perform_action(ACTION_NEXT_EPISODE);
-                    } else {
-                        perform_action(ACTION_PLAY_PAUSE);
-                    }
+                if (on_button && pressed_btn != UI_BTN_NONE) {
+                    /* 点击了按钮：执行对应动作 */
+                    on_ui_button(pressed_btn, NULL);
                 }
+                on_button = false;
+                pressed_btn = UI_BTN_NONE;
             }
         }
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -272,11 +330,16 @@ static void hid_monitor_task(void *arg)
             ui_set_conn_state(st);
             switch (st) {
             case UI_CONN_CONNECTED:
-                ui_show_action("已连接", "单击即可切换视频");
-                ui_set_footer("单击下一集  双击上一集  长按播放/暂停");
+                ui_show_action("已连接", "点屏幕按钮即可操作");
+                ui_set_footer("点屏幕按钮，或按实体键");
                 break;
             case UI_CONN_PAIRING:
-                ui_show_action("配对中", "请在电脑蓝牙设置中搜索");
+                /* 区分「主机未订阅」与「还没配好」，给出可操作的提示 */
+                if (hid_device_report_enabled()) {
+                    ui_show_action("配对中", "等待主机确认");
+                } else {
+                    ui_show_action("已连接", "等待主机订阅输入");
+                }
                 ui_set_footer("设备名 BiliMouse");
                 break;
             default:
@@ -304,6 +367,7 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ui init failed, continuing without display");
     } else {
+        ui_set_button_callback(on_ui_button, NULL);
         ui_show_action("BiliMouse", "正在启动蓝牙...");
         ui_set_footer("正在启动");
     }

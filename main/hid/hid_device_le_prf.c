@@ -560,6 +560,14 @@ void esp_hidd_prf_cb_hdl(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
             break;
         }
         case ESP_GATTS_CONF_EVT: {
+            /* BiliMouse 扩展：追踪主机是否订阅了输入报告(CCCD 写入)。
+             * 官方示例这里是空的，导致「连接成功但主机没订阅」时无法区分 ——
+             * 而这正是 macOS 上「能连上却收不到任何输入」的典型症状。 */
+            if (param->conf.handle == HIDD_LE_IDX_REPORT_MOUSE_IN_CCC ||
+                param->conf.handle == HIDD_LE_IDX_REPORT_KEY_IN_CCC ||
+                param->conf.handle == HIDD_LE_IDX_REPORT_CC_IN_CCC) {
+                esp_hidd_report_notify_status(param->conf.len ? true : false);
+            }
             break;
         }
         case ESP_GATTS_CREATE_EVT:

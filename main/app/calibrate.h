@@ -23,6 +23,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "pointer.h"   /* cal_target_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,11 +49,10 @@ void calibrate_exit(void);
 bool calibrate_is_active(void);
 
 /**
- * 处理屏幕触摸
- * @param x 触摸 X 坐标
- * @param y 触摸 Y 坐标
+ * 处理屏幕上的校准按钮点击
+ * @param target 要校准的目标
  */
-void calibrate_on_touch(uint16_t x, uint16_t y);
+void calibrate_select_target(cal_target_t target);
 
 /** 当前校准状态（供 UI 显示） */
 cal_state_t calibrate_state(void);
