@@ -1,0 +1,48 @@
+# ---- ESP-IDF 构建产物 ----
+build/
+build_*/
+sdkconfig
+sdkconfig.old
+*.bin
+*.elf
+*.map
+*.lst
+*.dd
+*.d
+*.i
+*.o
+*.a
+*.su
+*.dep
+
+# ---- 依赖管理 ----
+managed_components/
+dependencies.lock
+managed_components/
+
+# ---- 工具链与脚本 ----
+.tools/
+.toolcheck/
+
+# ---- IDE ----
+.vscode/
+.idea/
+*.code-workspace
+.vscode-test/
+
+# ---- 操作系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+
+# ---- 日志与临时文件 ----
+*.log
+tmp/
+temp/
