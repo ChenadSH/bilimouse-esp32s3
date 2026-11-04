@@ -35,6 +35,7 @@ static int g_count = 0;
 /* 按住提示事件（HOLD_*）单独统计 —— 它们不是动作 */
 static int g_hold_hints = 0;
 static int g_super_hints = 0;
+static int g_ultra_hints = 0;
 
 /* 只记录「动作类」事件（HOLD_* 是 UI 提示，不算动作） */
 static void on_gesture(gesture_t g, void *ctx)
@@ -48,6 +49,10 @@ static void on_gesture(gesture_t g, void *ctx)
         g_super_hints++;
         return;
     }
+    if (g == GESTURE_HOLD_ULTRA) {
+        g_ultra_hints++;
+        return;
+    }
     if (g_count < MAX_EVENTS) {
         g_events[g_count++] = g;
     }
@@ -58,12 +63,31 @@ static void reset(void)
     g_count = 0;
     g_hold_hints = 0;
     g_super_hints = 0;
+    g_ultra_hints = 0;
     memset(g_events, 0, sizeof(g_events));
     fsm_config_t cfg = {
         .click_max_ms        = 250,
         .double_click_gap_ms = 300,
         .long_press_ms       = 600,
         .super_long_press_ms = 1500,
+    };
+    button_fsm_init(&cfg, on_gesture, NULL);
+}
+
+/* 带 4 秒档位的重置（触摸校准手势） */
+static void reset_ultra(void)
+{
+    g_count = 0;
+    g_hold_hints = 0;
+    g_super_hints = 0;
+    g_ultra_hints = 0;
+    memset(g_events, 0, sizeof(g_events));
+    fsm_config_t cfg = {
+        .click_max_ms        = 250,
+        .double_click_gap_ms = 300,
+        .long_press_ms       = 600,
+        .super_long_press_ms = 1500,
+        .ultra_long_press_ms = 4000,
     };
     button_fsm_init(&cfg, on_gesture, NULL);
 }
@@ -248,6 +272,39 @@ int main(void)
         failures++;
     } else {
         printf("PASS  %-42s\n", "isolated single click");
+    }
+
+    /* --- 4 秒长按 = 触摸校准，且不与超长按重复触发 --- */
+    reset_ultra(); long_press(4100);
+    total++;
+    if (g_count != 1 || g_events[0] != GESTURE_ULTRA_LONG) {
+        printf("FAIL  %-42s got %d event(s), first=%d\n", "hold 4.1s -> ultra long", g_count,
+               g_count ? (int)g_events[0] : -1);
+        failures++;
+    } else {
+        printf("PASS  %-42s\n", "hold 4.1s -> ultra long");
+    }
+
+    reset_ultra(); long_press(4100);
+    total++;
+    if (g_count != 1 || g_events[0] != GESTURE_ULTRA_LONG ||
+        g_hold_hints != 1 || g_super_hints != 1 || g_ultra_hints != 1) {
+        printf("FAIL  %-42s actions=%d hold=%d super=%d ultra=%d\n",
+               "ultra hint chain", g_count, g_hold_hints, g_super_hints, g_ultra_hints);
+        failures++;
+    } else {
+        printf("PASS  %-42s\n", "ultra hint chain");
+    }
+
+    /* --- 4 秒档位未配置时，超长按行为保持不变 --- */
+    reset(); long_press(4100);
+    total++;
+    if (g_count != 1 || g_events[0] != GESTURE_SUPER_LONG) {
+        printf("FAIL  %-42s got %d event(s), first=%d\n", "no ultra slot -> super long", g_count,
+               g_count ? (int)g_events[0] : -1);
+        failures++;
+    } else {
+        printf("PASS  %-42s\n", "no ultra slot -> super long");
     }
 
     printf("\n==== %d/%d passed, %d failed ====\n", total - failures, total, failures);

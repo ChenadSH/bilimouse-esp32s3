@@ -33,6 +33,11 @@ typedef struct {
     uint16_t debounce_ms;
     uint16_t long_press_ms;
     uint16_t super_long_press_ms;
+    uint16_t ultra_long_press_ms;
+
+    /* 触摸坐标映射：screen = k[0..2]*raw + k[3..5] */
+    bool     touch_calibrated;
+    float    touch_k[6];
 } settings_t;
 
 /** 加载配置（无存档时填默认值） */
@@ -43,6 +48,12 @@ esp_err_t settings_save(const settings_t *cfg);
 
 /** 恢复默认配置并保存 */
 void settings_reset_default(settings_t *cfg);
+
+/** 全局配置（settings_load 之后有效），供各模块读取 */
+const settings_t *settings_get(void);
+
+/** 全局配置的可写指针，改完需自行调用 settings_save */
+settings_t *settings_mut(void);
 
 #ifdef __cplusplus
 }

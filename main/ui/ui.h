@@ -30,7 +30,16 @@ typedef enum {
     UI_MODE_REMOTE = 0,   /* 遥控模式 */
     UI_MODE_MOUSE,        /* 鼠标模式 */
     UI_MODE_CALIBRATE,    /* 校准模式 */
+    UI_MODE_TOUCH_CAL,    /* 触摸校准向导 */
 } ui_mode_t;
+
+/** 触摸校准界面状态 */
+typedef struct {
+    int  stage;            /* 0/1/2 = 采集第 1/2/3 点，3 = 验证 */
+    int  target_x, target_y; /* 目标点（屏幕坐标） */
+    int  point_x, point_y;   /* 当前触点（屏幕坐标） */
+    bool has_point;
+} ui_touch_cal_state_t;
 
 /** 屏上可点击的按钮 */
 typedef enum {
@@ -82,6 +91,9 @@ ui_button_t ui_hit_test(uint16_t x, uint16_t y);
 
 /** 标记需要重绘 */
 void ui_mark_dirty(void);
+
+/** 更新触摸校准界面内容（仅在 UI_MODE_TOUCH_CAL 下绘制） */
+void ui_touch_cal_render(const ui_touch_cal_state_t *st);
 
 /** 刷新到屏幕（若脏标记则重绘） */
 void ui_flush(void);

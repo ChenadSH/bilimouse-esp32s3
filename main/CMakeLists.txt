@@ -13,6 +13,7 @@ idf_component_register(
         "app/imu_gesture.c"
         "app/pointer.c"
         "app/calibrate.c"
+        "app/touch_cal.c"
         "ui/ui.c"
         "ui/ui_font.c"
         "hid/hid_device.c"

@@ -100,6 +100,9 @@ static char s_footer[48] = "";
 static ui_button_cb_t s_btn_cb;
 static void *s_btn_ctx;
 
+/* 触摸校准界面状态（UI_MODE_TOUCH_CAL 时使用） */
+static ui_touch_cal_state_t s_tcal = { .stage = -1 };
+
 /* ==================== 绘图基础 ==================== */
 
 static inline void px_set(uint16_t *buf, int x, int y, uint16_t color)
@@ -248,6 +251,7 @@ static void draw_header(void)
     switch (s_mode) {
     case UI_MODE_MOUSE:      mode_txt = "鼠标模式";   break;
     case UI_MODE_CALIBRATE:  mode_txt = "校准模式";   break;
+    case UI_MODE_TOUCH_CAL:  mode_txt = "触摸校准";   break;
     case UI_MODE_REMOTE:
     default:                 mode_txt = "遥控模式";   break;
     }
@@ -327,6 +331,43 @@ static void draw_footer(void)
     }
 }
 
+/* ==================== 触摸校准界面 ==================== */
+
+/** 空心矩形边框 */
+static void draw_frame(int x, int y, int w, int h, int t, uint16_t color)
+{
+    fill_rect(x, y, w, t, color);
+    fill_rect(x, y + h - t, w, t, color);
+    fill_rect(x, y, t, h, color);
+    fill_rect(x + w - t, y, t, h, color);
+}
+
+/** 十字准星 */
+static void draw_cross(int cx, int cy, int arm, int t, uint16_t color)
+{
+    fill_rect(cx - arm, cy - t / 2, arm * 2 + t, t, color);
+    fill_rect(cx - t / 2, cy - arm, t, arm * 2 + t, color);
+}
+
+static void draw_touch_cal(void)
+{
+    if (s_tcal.stage < 0) {
+        return;
+    }
+
+    if (s_tcal.stage < 3) {
+        /* 目标框：44x44 外框 + 正中实心块，手指粗也能盖住 */
+        int bx = s_tcal.target_x - 22;
+        int by = s_tcal.target_y - 22;
+        draw_frame(bx, by, 44, 44, 3, COL_ERR);
+        fill_rect(s_tcal.target_x - 5, s_tcal.target_y - 5, 10, 10, COL_ERR);
+    }
+
+    if (s_tcal.has_point) {
+        draw_cross(s_tcal.point_x, s_tcal.point_y, 14, 3, COL_OK);
+    }
+}
+
 static void redraw(void)
 {
     if (!s_buf) {
@@ -336,7 +377,9 @@ static void redraw(void)
     draw_header();
     draw_action_card();
 
-    if (s_mode == UI_MODE_CALIBRATE) {
+    if (s_mode == UI_MODE_TOUCH_CAL) {
+        draw_touch_cal();
+    } else if (s_mode == UI_MODE_CALIBRATE) {
         draw_btn_group(s_cal_btns, CAL_BTN_CNT);
     } else if (s_mode == UI_MODE_REMOTE) {
         draw_btn_group(s_main_btns, MAIN_BTN_CNT);
@@ -365,6 +408,10 @@ static ui_button_t hit_group(const btn_def_t *btns, size_t cnt, uint16_t x, uint
 
 ui_button_t ui_hit_test(uint16_t x, uint16_t y)
 {
+    if (s_mode == UI_MODE_TOUCH_CAL) {
+        /* 校准向导独占触摸：任何点击都算向导输入 */
+        return UI_BTN_NONE;
+    }
     if (s_mode == UI_MODE_CALIBRATE) {
         return hit_group(s_cal_btns, CAL_BTN_CNT, x, y);
     }
@@ -476,4 +523,30 @@ void ui_flush(void)
     if (s_dirty) {
         redraw();
     }
+}
+
+void ui_touch_cal_render(const ui_touch_cal_state_t *st)
+{
+    if (st == NULL) {
+        return;
+    }
+
+    bool changed = (st->stage != s_tcal.stage) ||
+                   (st->has_point != s_tcal.has_point);
+    /* 十字每帧都在动，位移超过 2 像素才重绘，避免无谓刷屏 */
+    if (!changed && st->has_point) {
+        int dx = st->point_x - s_tcal.point_x;
+        int dy = st->point_y - s_tcal.point_y;
+        changed = (dx > 2 || dx < -2 || dy > 2 || dy < -2);
+    }
+    if (!changed && st->stage < 3 && (st->target_x != s_tcal.target_x ||
+                                      st->target_y != s_tcal.target_y)) {
+        changed = true;
+    }
+    if (!changed) {
+        return;
+    }
+
+    s_tcal = *st;
+    s_dirty = true;
 }

@@ -37,8 +37,10 @@ typedef enum {
     GESTURE_DOUBLE_CLICK,   /* 双击 */
     GESTURE_LONG_PRESS,     /* 长按（松手时触发） */
     GESTURE_SUPER_LONG,     /* 超长按（松手时触发） */
+    GESTURE_ULTRA_LONG,     /* 4 秒长按：触摸校准 */
     GESTURE_HOLD_START,     /* 按住达到长按阈值——仅用于 UI 提示，不执行动作 */
     GESTURE_HOLD_SUPER,     /* 按住达到超长按阈值——仅用于 UI 提示，不执行动作 */
+    GESTURE_HOLD_ULTRA,     /* 按住达到超长按（4s）阈值——仅用于 UI 提示 */
 } gesture_t;
 
 /** 事件回调（在手势确定时触发） */
@@ -50,6 +52,7 @@ typedef struct {
     uint16_t double_click_gap_ms; /* 双击判定窗口 */
     uint16_t long_press_ms;       /* 长按阈值 */
     uint16_t super_long_press_ms; /* 超长按阈值 */
+    uint16_t ultra_long_press_ms; /* 4 秒长按阈值（触摸校准） */
 } fsm_config_t;
 
 /**

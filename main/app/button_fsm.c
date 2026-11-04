@@ -17,6 +17,7 @@ static fsm_state_t s_state = ST_IDLE;
 static uint32_t    s_press_time;      /* 按下时刻 */
 static bool        s_hold_hint_sent;  /* 长按提示已发 */
 static bool        s_super_hint_sent; /* 超长按提示已发 */
+static bool        s_ultra_hint_sent; /* 4 秒长按提示已发 */
 static bool        s_second_click;    /* 当前这次按下是第二击 */
 static bool        s_first_click_valid;/* 第一击是有效短按 */
 static uint32_t    s_click_deadline;  /* 单击候选截止时刻 */
@@ -37,6 +38,7 @@ void button_fsm_init(const fsm_config_t *cfg, gesture_cb_t cb, void *ctx)
         s_cfg.double_click_gap_ms = 300;
         s_cfg.long_press_ms       = 600;
         s_cfg.super_long_press_ms = 1500;
+        s_cfg.ultra_long_press_ms = 4000;
     }
     s_cb  = cb;
     s_ctx = ctx;
@@ -45,6 +47,7 @@ void button_fsm_init(const fsm_config_t *cfg, gesture_cb_t cb, void *ctx)
     s_press_time         = 0;
     s_hold_hint_sent     = false;
     s_super_hint_sent    = false;
+    s_ultra_hint_sent    = false;
     s_second_click       = false;
     s_first_click_valid  = false;
     s_click_deadline     = 0;
@@ -96,6 +99,15 @@ void button_fsm_update(bool pressed, uint32_t now_ms)
         return;
     }
 
+    if (s_cfg.ultra_long_press_ms >= s_cfg.super_long_press_ms &&
+        held >= s_cfg.ultra_long_press_ms) {
+        /* 4 秒长按：触摸校准。优先级最高，且与其它档位互斥 */
+        s_state             = ST_IDLE;
+        s_first_click_valid = false;
+        fire(GESTURE_ULTRA_LONG);
+        return;
+    }
+
     if (held >= s_cfg.super_long_press_ms) {
         /* 超长按：与长按互斥，只执行这一个动作 */
         s_state             = ST_IDLE;
@@ -136,7 +148,11 @@ void button_fsm_tick(uint32_t now_ms)
         uint32_t held = now_ms - s_press_time;
 
         /* 按住期间只发 UI 提示，不执行动作 —— 保证长按与超长按互斥 */
-        if (!s_super_hint_sent && held >= s_cfg.super_long_press_ms) {
+        if (!s_ultra_hint_sent && s_cfg.ultra_long_press_ms &&
+            held >= s_cfg.ultra_long_press_ms) {
+            s_ultra_hint_sent = true;
+            fire(GESTURE_HOLD_ULTRA);
+        } else if (!s_super_hint_sent && held >= s_cfg.super_long_press_ms) {
             s_super_hint_sent = true;
             fire(GESTURE_HOLD_SUPER);
         } else if (!s_hold_hint_sent && held >= s_cfg.long_press_ms) {
