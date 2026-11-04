@@ -7,6 +7,7 @@
 
 #include "hid_device.h"
 #include "hid_dev.h"
+#include "pointer.h"
 
 static const char *TAG = "actions";
 
@@ -23,11 +24,9 @@ esp_err_t action_execute(action_t action, const action_ctx_t *ctx)
     switch (action) {
     case ACTION_NEXT_EPISODE:
         if (ctx && ctx->next_calibrated) {
-            /* 已校准：分步移动到"下一集"按钮后左键点击 */
-            ESP_RETURN_ON_ERROR(hid_mouse_move_relative_steps(ctx->next_dx, ctx->next_dy,
-                                                              CLICK_MOVE_STEPS), TAG, "move failed");
-            vTaskDelay(pdMS_TO_TICKS(60));
-            ESP_RETURN_ON_ERROR(hid_mouse_click(HID_MOUSE_LEFT), TAG, "click failed");
+            /* 已校准：沿校准路径移动到"下一集"按钮后左键点击 */
+            ESP_RETURN_ON_ERROR(pointer_move_and_click(ctx->next_dx, ctx->next_dy),
+                                TAG, "move+click failed");
         } else {
             /* 未校准：回退到键盘方案（多 P 场景有效） */
             ESP_LOGW(TAG, "next episode not calibrated, fallback to ']' key");
@@ -37,10 +36,8 @@ esp_err_t action_execute(action_t action, const action_ctx_t *ctx)
 
     case ACTION_PREV_EPISODE:
         if (ctx && ctx->prev_calibrated) {
-            ESP_RETURN_ON_ERROR(hid_mouse_move_relative_steps(ctx->prev_dx, ctx->prev_dy,
-                                                              CLICK_MOVE_STEPS), TAG, "move failed");
-            vTaskDelay(pdMS_TO_TICKS(60));
-            ESP_RETURN_ON_ERROR(hid_mouse_click(HID_MOUSE_LEFT), TAG, "click failed");
+            ESP_RETURN_ON_ERROR(pointer_move_and_click(ctx->prev_dx, ctx->prev_dy),
+                                TAG, "move+click failed");
         } else {
             ESP_LOGW(TAG, "prev episode not calibrated, fallback to '[' key");
             ESP_RETURN_ON_ERROR(hid_keyboard_tap(HID_KEY_LEFT_BRKT, HID_MOD_NONE), TAG, "key failed");

@@ -229,7 +229,6 @@ esp_err_t hid_mouse_move(int8_t dx, int8_t dy)
     esp_hidd_send_mouse_value(s_conn_id, cmd, dx, dy);
     return ESP_OK;
 }
-
 esp_err_t hid_mouse_scroll(int8_t wheel)
 {
     if (!hid_device_is_ready()) {

@@ -15,11 +15,11 @@ static void *s_ctx;
 
 static fsm_state_t s_state = ST_IDLE;
 static uint32_t    s_press_time;      /* 按下时刻 */
-static bool        s_long_fired;       /* 长按已触发 */
-static bool        s_super_fired;      /* 超长按已触发 */
-static bool        s_second_click;     /* 当前这次按下是第二击 */
+static bool        s_hold_hint_sent;  /* 长按提示已发 */
+static bool        s_super_hint_sent; /* 超长按提示已发 */
+static bool        s_second_click;    /* 当前这次按下是第二击 */
 static bool        s_first_click_valid;/* 第一击是有效短按 */
-static uint32_t    s_click_deadline;   /* 单击候选截止时刻 */
+static uint32_t    s_click_deadline;  /* 单击候选截止时刻 */
 
 static void fire(gesture_t g)
 {
@@ -41,13 +41,13 @@ void button_fsm_init(const fsm_config_t *cfg, gesture_cb_t cb, void *ctx)
     s_cb  = cb;
     s_ctx = ctx;
 
-    s_state             = ST_IDLE;
-    s_press_time        = 0;
-    s_long_fired        = false;
-    s_super_fired       = false;
-    s_second_click      = false;
-    s_first_click_valid = false;
-    s_click_deadline    = 0;
+    s_state              = ST_IDLE;
+    s_press_time         = 0;
+    s_hold_hint_sent     = false;
+    s_super_hint_sent    = false;
+    s_second_click       = false;
+    s_first_click_valid  = false;
+    s_click_deadline     = 0;
 }
 
 void button_fsm_update(bool pressed, uint32_t now_ms)
@@ -55,11 +55,11 @@ void button_fsm_update(bool pressed, uint32_t now_ms)
     if (pressed) {
         switch (s_state) {
         case ST_IDLE:
-            s_state          = ST_PRESSED;
-            s_press_time     = now_ms;
-            s_long_fired     = false;
-            s_super_fired    = false;
-            s_second_click   = false;
+            s_state           = ST_PRESSED;
+            s_press_time      = now_ms;
+            s_hold_hint_sent  = false;
+            s_super_hint_sent = false;
+            s_second_click    = false;
             break;
 
         case ST_CLICK_PENDING:
@@ -68,8 +68,8 @@ void button_fsm_update(bool pressed, uint32_t now_ms)
             s_first_click_valid = false;
             s_state             = ST_PRESSED;
             s_press_time        = now_ms;
-            s_long_fired        = false;
-            s_super_fired       = false;
+            s_hold_hint_sent    = false;
+            s_super_hint_sent   = false;
             break;
 
         case ST_PRESSED:
@@ -80,36 +80,15 @@ void button_fsm_update(bool pressed, uint32_t now_ms)
         return;
     }
 
-    /* ---- 松开 ---- */
+    /* ---- 松开：此刻统一决策 ---- */
     if (s_state != ST_PRESSED) {
         return;
     }
 
     uint32_t held = now_ms - s_press_time;
 
-    if (s_super_fired || s_long_fired) {
-        /* 长按/超长按已在按住期间触发过，松开不再产生动作 */
-        s_state = ST_IDLE;
-        s_second_click = false;
-        return;
-    }
-
-    if (held > s_cfg.click_max_ms) {
-        /* 按住过久但未达长按阈值：本次按压无效。
-           若第一击有效，则补发单击（第二击超时的情况）。 */
-        s_state = ST_IDLE;
-        if (s_second_click && s_first_click_valid) {
-            s_second_click      = false;
-            s_first_click_valid = false;
-            fire(GESTURE_SINGLE_CLICK);
-        }
-        s_second_click = false;
-        return;
-    }
-
-    /* 短按 */
     if (s_second_click) {
-        /* 第二击的松开 -> 双击完成 */
+        /* 第二击的松开 -> 双击完成（长按/超长按在第二击时不适用） */
         s_state             = ST_IDLE;
         s_second_click      = false;
         s_first_click_valid = false;
@@ -117,7 +96,34 @@ void button_fsm_update(bool pressed, uint32_t now_ms)
         return;
     }
 
-    /* 第一击的松开 -> 进入单击候选窗口 */
+    if (held >= s_cfg.super_long_press_ms) {
+        /* 超长按：与长按互斥，只执行这一个动作 */
+        s_state             = ST_IDLE;
+        s_first_click_valid = false;
+        fire(GESTURE_SUPER_LONG);
+        return;
+    }
+
+    if (held >= s_cfg.long_press_ms) {
+        /* 长按 */
+        s_state             = ST_IDLE;
+        s_first_click_valid = false;
+        fire(GESTURE_LONG_PRESS);
+        return;
+    }
+
+    if (held > s_cfg.click_max_ms) {
+        /* 按住过久但未达长按阈值：本次按压无效 */
+        s_state = ST_IDLE;
+        if (s_first_click_valid) {
+            s_first_click_valid = false;
+            fire(GESTURE_SINGLE_CLICK);
+        }
+        s_second_click = false;
+        return;
+    }
+
+    /* 短按 -> 进入单击候选窗口 */
     s_state             = ST_CLICK_PENDING;
     s_first_click_valid = true;
     s_click_deadline    = now_ms + s_cfg.double_click_gap_ms;
@@ -129,13 +135,13 @@ void button_fsm_tick(uint32_t now_ms)
     case ST_PRESSED: {
         uint32_t held = now_ms - s_press_time;
 
-        if (!s_super_fired && held >= s_cfg.super_long_press_ms) {
-            s_super_fired = true;
-            s_long_fired  = true;   /* 超长按覆盖长按 */
-            fire(GESTURE_SUPER_LONG);
-        } else if (!s_long_fired && held >= s_cfg.long_press_ms) {
-            s_long_fired = true;
-            fire(GESTURE_LONG_PRESS);
+        /* 按住期间只发 UI 提示，不执行动作 —— 保证长按与超长按互斥 */
+        if (!s_super_hint_sent && held >= s_cfg.super_long_press_ms) {
+            s_super_hint_sent = true;
+            fire(GESTURE_HOLD_SUPER);
+        } else if (!s_hold_hint_sent && held >= s_cfg.long_press_ms) {
+            s_hold_hint_sent = true;
+            fire(GESTURE_HOLD_START);
         }
         break;
     }

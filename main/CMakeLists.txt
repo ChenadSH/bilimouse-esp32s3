@@ -10,6 +10,7 @@ idf_component_register(
         "app/button_fsm.c"
         "app/actions.c"
         "app/imu_gesture.c"
+        "app/pointer.c"
         "ui/ui.c"
         "ui/ui_font.c"
         "hid/hid_device.c"
