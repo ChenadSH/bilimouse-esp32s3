@@ -27,13 +27,29 @@ typedef enum {
 
 /** 运行模式 */
 typedef enum {
-    UI_MODE_REMOTE = 0,   /* 遥控模式 */
+    UI_MODE_HOME = 0,     /* 首页：icon 左右滑动切换 */
+    UI_MODE_REMOTE,       /* B站控制页 */
     UI_MODE_MOUSE,        /* 鼠标模式（左右键按钮 + 中间触控板） */
     UI_MODE_CALIBRATE,    /* 校准模式 */
     UI_MODE_TOUCH_CAL,    /* 触摸校准向导 */
     UI_MODE_IR,           /* 红外遥控（学习 / 发射） */
     UI_MODE_RADIO,        /* 网络电台 */
+    UI_MODE_RADIO_LIST,   /* 电台列表选择 */
+    UI_MODE_NAV,          /* 导航提醒 */
+    UI_MODE_OTA_PAGE,     /* 升级页（版本/进度/包大小） */
 } ui_mode_t;
+
+/** 首页 icon（顺序即轮播顺序） */
+typedef enum {
+    HOME_ICON_BILI = 0,   /* B站视频控制 */
+    HOME_ICON_MOUSE,      /* 鼠标模拟 */
+    HOME_ICON_IR,         /* 红外模拟 */
+    HOME_ICON_RADIO,      /* 网络电台 */
+    HOME_ICON_NAV,        /* 导航提醒 */
+    HOME_ICON_OTA,        /* 在线升级 */
+    HOME_ICON_CAL,        /* 触摸校准 */
+    HOME_ICON_COUNT
+} home_icon_t;
 
 /** 触摸校准界面状态 */
 typedef struct {
@@ -46,23 +62,39 @@ typedef struct {
 /** 屏上可点击的按钮 */
 typedef enum {
     UI_BTN_NONE = 0,
-    /* 遥控模式 */
+    /* 首页 */
+    UI_BTN_HOME_ICON0,       /* 首页当前页 icon（点击进入对应功能） */
+    UI_BTN_HOME_PREV,        /* 首页上一屏（左边缘） */
+    UI_BTN_HOME_NEXT,        /* 首页下一屏（右边缘） */
+    /* B站控制页 */
     UI_BTN_PREV_EPISODE,     /* 上一集 */
     UI_BTN_NEXT_EPISODE,     /* 下一集 */
     UI_BTN_PLAY_PAUSE,       /* 播放/暂停 */
     UI_BTN_VOLUME_UP,        /* 音量+ */
     UI_BTN_VOLUME_DOWN,      /* 音量- */
     UI_BTN_FULLSCREEN,       /* 全屏 */
+    UI_BTN_HOME,             /* 返回首页 */
     UI_BTN_MOUSE_MODE,       /* 鼠标模式开关 */
     UI_BTN_TOUCH_CAL,        /* 重新校准触摸 */
     UI_BTN_OTA,              /* 检查固件更新（OTA） */
     UI_BTN_IR_MODE,          /* 进入红外遥控 */
+    UI_BTN_NAV_MODE,         /* 进入导航提醒 */
     /* 电台模式 */
     UI_BTN_RADIO_MODE,       /* 进入电台 */
     UI_BTN_RADIO_PREV,       /* 上一台 */
     UI_BTN_RADIO_NEXT,       /* 下一台 */
     UI_BTN_RADIO_TOGGLE,     /* 播放/停止 */
-    UI_BTN_RADIO_BACK,       /* 返回遥控模式 */
+    UI_BTN_RADIO_LIST,       /* 查看台列表 */
+    UI_BTN_RADIO_LIST_BACK,  /* 台列表返回 */
+    UI_BTN_RADIO_PICK0,      /* 选择台 0..7（动态命中返回） */
+    UI_BTN_RADIO_PICK1,
+    UI_BTN_RADIO_PICK2,
+    UI_BTN_RADIO_PICK3,
+    UI_BTN_RADIO_PICK4,
+    UI_BTN_RADIO_PICK5,
+    UI_BTN_RADIO_PICK6,
+    UI_BTN_RADIO_PICK7,
+    UI_BTN_RADIO_BACK,       /* 返回首页 */
     /* 鼠标模式：左右键（按下=按住，抬起=松开，可拖拽） */
     UI_BTN_MOUSE_LEFT,       /* 左键 */
     UI_BTN_MOUSE_RIGHT,      /* 右键 */
@@ -70,7 +102,11 @@ typedef enum {
     UI_BTN_IR_LEARN,         /* 学习当前槽 */
     UI_BTN_IR_SEND,          /* 发射当前槽 */
     UI_BTN_IR_SLOT,          /* 切换槽位 */
-    UI_BTN_IR_BACK,          /* 返回遥控模式 */
+    UI_BTN_IR_BACK,          /* 返回首页 */
+    /* 导航提醒页 */
+    UI_BTN_NAV_TEST,         /* 推一条测试提醒 */
+    /* 升级页 */
+    UI_BTN_OTA_START,        /* 开始检查/升级 */
     /* 校准模式 */
     UI_BTN_CAL_NEXT,         /* 校准：下一集 */
     UI_BTN_CAL_PREV,         /* 校准：上一集 */
@@ -92,6 +128,17 @@ void ui_set_conn_state(ui_conn_state_t state);
 
 /** 设置运行模式 */
 void ui_set_mode(ui_mode_t mode);
+
+/** 当前模式是否为首页（触摸任务判断滑动/点击语义用） */
+bool ui_mode_is_home(void);
+
+/* ---- 首页轮播 ---- */
+int  ui_home_page(void);        /* 当前页 0..page_count-1 */
+int  ui_home_page_count(void);
+void ui_home_prev_page(void);
+void ui_home_next_page(void);
+/** 首页当前页对应的功能 icon */
+home_icon_t ui_home_current_icon(void);
 
 /** 显示一次动作反馈（大字 + 副标题） */
 void ui_show_action(const char *title, const char *subtitle);

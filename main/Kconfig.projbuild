@@ -25,6 +25,18 @@ menu "BiliMouse"
         help
             与 BILIMOUSE_WIFI_SSID2 配对使用。
 
+    config BILIMOUSE_WIFI_SSID3
+        string "备用 WiFi SSID 2（前两个都连不上时尝试）"
+        default "九天诛仙"
+        help
+            第二个备用 SSID。串口 wifi set 存的凭据最优先。
+
+    config BILIMOUSE_WIFI_PASS3
+        string "备用 WiFi 密码 2"
+        default "20158888"
+        help
+            与 BILIMOUSE_WIFI_SSID3 配对使用。
+
     config BILIMOUSE_OTA_URL
         string "OTA manifest 地址"
         default "https://github.com/ChenadSH/bilimouse-esp32s3/releases/latest/download/manifest.json"

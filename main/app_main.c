@@ -38,6 +38,7 @@
 #include "cli.h"
 #include "hid_device.h"
 #include "ir_remote.h"
+#include "nav_alert.h"
 #include "ota_update.h"
 #include "pointer.h"
 #include "power_mgr.h"
@@ -78,17 +79,83 @@ static void set_mouse_mode(bool on)
 {
     s_mouse_mode = on;
     hid_mouse_release_all();   /* 切模式时别把主机卡在"按住"状态 */
-    ui_set_mode(on ? UI_MODE_MOUSE : UI_MODE_REMOTE);
     if (on) {
+        ui_set_mode(UI_MODE_MOUSE);
         ui_show_action("鼠标模式", "两侧=左右键");
         ui_set_footer("中间拖动=移动  轻点=左键");
     } else {
-        ui_show_action("遥控模式", "点屏幕按钮操作");
-        ui_set_footer("实体键=空格  轻点=左键");
+        ui_set_mode(UI_MODE_HOME);
+        ui_show_action("BiliMouse", "左右滑动选功能");
+        ui_set_footer("左右滑动选功能，点 icon 打开");
     }
 }
 
-/* ==================== 红外遥控 ==================== */
+/* ---- 首页与各功能页 ---- */
+
+static void go_home(void)
+{
+    set_mouse_mode(false);
+}
+
+static void enter_ir_mode(void);   /* 定义在红外遥控小节 */
+
+static void enter_radio(void)
+{
+    ui_set_mode(UI_MODE_RADIO);
+    radio_enter();
+}
+
+static void enter_nav(void)
+{
+    ui_set_mode(UI_MODE_NAV);
+    char msg[96];
+    if (nav_alert_has_message()) {
+        nav_alert_get(msg, sizeof(msg), NULL);
+        ui_show_action("导航提醒", msg);
+    } else {
+        ui_show_action("导航提醒", "等待手机快捷指令推送");
+    }
+    ui_set_footer("CarPlay 需 MFi 硬件，此为替代方案");
+}
+
+static void enter_ota_page(void)
+{
+    ui_set_mode(UI_MODE_OTA_PAGE);
+    ui_show_action("在线升级", "点「开始升级」检查更新");
+    ui_set_footer("升级中全程别断电");
+}
+
+/** 首页当前 icon 进入对应功能页 */
+static void open_home_icon(home_icon_t icon)
+{
+    switch (icon) {
+    case HOME_ICON_BILI:
+        ui_set_mode(UI_MODE_REMOTE);
+        ui_show_action("B站控制", "点屏幕按钮操作");
+        ui_set_footer("实体键=空格  轻点=左键");
+        break;
+    case HOME_ICON_MOUSE:
+        set_mouse_mode(true);
+        break;
+    case HOME_ICON_IR:
+        enter_ir_mode();
+        break;
+    case HOME_ICON_RADIO:
+        enter_radio();
+        break;
+    case HOME_ICON_NAV:
+        enter_nav();
+        break;
+    case HOME_ICON_OTA:
+        enter_ota_page();
+        break;
+    case HOME_ICON_CAL:
+        start_touch_cal();
+        break;
+    default:
+        break;
+    }
+}
 
 static volatile bool s_ir_learning;
 
@@ -147,6 +214,22 @@ static void on_ui_button(ui_button_t btn, void *ctx)
     (void)ctx;
 
     switch (btn) {
+    /* ---- 首页 ---- */
+    case UI_BTN_HOME_ICON0:
+        open_home_icon(ui_home_current_icon());
+        break;
+    case UI_BTN_HOME_PREV:
+        ui_home_prev_page();
+        break;
+    case UI_BTN_HOME_NEXT:
+        ui_home_next_page();
+        break;
+    case UI_BTN_HOME:
+        radio_stop();      /* 离开电台页时顺手停播，静默无副作用 */
+        go_home();
+        break;
+
+    /* ---- B站控制页 ---- */
     case UI_BTN_PREV_EPISODE:
         perform_action(ACTION_PREV_EPISODE);
         break;
@@ -172,12 +255,16 @@ static void on_ui_button(ui_button_t btn, void *ctx)
         start_touch_cal();
         break;
     case UI_BTN_OTA:
+    case UI_BTN_OTA_START:
         ui_show_action("检查更新", "正在准备 WiFi");
         ui_set_footer("结果看屏幕/串口，全程别断电");
         ota_update_start_manual();
         break;
     case UI_BTN_IR_MODE:
         enter_ir_mode();
+        break;
+    case UI_BTN_NAV_MODE:
+        enter_nav();
         break;
 
     /* 电台模式 */
@@ -194,11 +281,35 @@ static void on_ui_button(ui_button_t btn, void *ctx)
     case UI_BTN_RADIO_TOGGLE:
         radio_toggle();
         break;
+    case UI_BTN_RADIO_LIST:
+        ui_set_mode(UI_MODE_RADIO_LIST);
+        ui_show_action("选择电台", "点台名直接播放");
+        break;
+    case UI_BTN_RADIO_LIST_BACK:
+        ui_set_mode(UI_MODE_RADIO);
+        ui_show_action("电台", "已返回");
+        break;
     case UI_BTN_RADIO_BACK:
         radio_stop();
-        ui_set_mode(UI_MODE_REMOTE);
-        ui_show_action("遥控模式", "点屏幕按钮操作");
-        ui_set_footer("实体键=空格  轻点=左键");
+        go_home();
+        break;
+
+    /* 台列表点行选台（UI_BTN_RADIO_PICK0..7） */
+    case UI_BTN_RADIO_PICK0:
+    case UI_BTN_RADIO_PICK1:
+    case UI_BTN_RADIO_PICK2:
+    case UI_BTN_RADIO_PICK3:
+    case UI_BTN_RADIO_PICK4:
+    case UI_BTN_RADIO_PICK5:
+    case UI_BTN_RADIO_PICK6:
+    case UI_BTN_RADIO_PICK7:
+        radio_select(btn - UI_BTN_RADIO_PICK0);
+        ui_set_mode(UI_MODE_RADIO);
+        break;
+
+    /* 导航提醒 */
+    case UI_BTN_NAV_TEST:
+        nav_alert_push("300米后右转，进入辅路");
         break;
 
     /* 红外模式 */
@@ -288,12 +399,12 @@ static void perform_action(action_t action)
 /** 校准结束（成功或超时）后恢复原来的界面 */
 static void on_touch_cal_done(bool ok)
 {
-    ui_set_mode(s_mouse_mode ? UI_MODE_MOUSE : UI_MODE_REMOTE);
+    ui_set_mode(s_mouse_mode ? UI_MODE_MOUSE : UI_MODE_HOME);
     s_cal_shown_stage = -1;
 
     if (ok) {
         ui_show_action("触摸已校准", "点按钮试试");
-        ui_set_footer("实体键=空格  轻点=左键");
+        ui_set_footer("左右滑动选功能，点 icon 打开");
         ESP_LOGI(TAG, "touch calibration finished");
     } else {
         ui_show_action("校准未完成", "点校准按钮可重做");
@@ -439,6 +550,8 @@ static void touch_task(void *arg)
     bool was_pressed = false;
     bool on_button = false;      /* 本次触摸是否落在按钮上 */
     bool swallow = false;        /* 本次触摸只用来点亮屏幕，不执行动作 */
+    bool home_gesture = false;   /* 首页空白处滑动 = 翻页，不移动指针 */
+    int16_t first_x = 0;         /* 按下时的起始 x（计算滑动方向） */
     ui_button_t pressed_btn = UI_BTN_NONE;
     uint8_t hold_btn = 0;        /* 当前按住的鼠标键（左/右），0=没按住 */
     int16_t last_x = 0, last_y = 0;
@@ -491,6 +604,8 @@ static void touch_task(void *arg)
                     /* 触摸开始：判定是否落在按钮上 */
                     pressed_btn = ui_hit_test(sx, sy);
                     on_button = (pressed_btn != UI_BTN_NONE);
+                    home_gesture = ui_mode_is_home() && !on_button;
+                    first_x = (int16_t)sx;
                     last_x = (int16_t)sx;
                     last_y = (int16_t)sy;
                     press_ms = now;
@@ -511,6 +626,14 @@ static void touch_task(void *arg)
                     ESP_LOGI(TAG, "touch raw=(%u,%u) -> (%u,%u) btn=%d",
                              t.raw_x, t.raw_y, sx, sy, (int)pressed_btn);
 #endif
+                } else if (home_gesture) {
+                    /* 首页空白滑动：只累计距离，翻页在松手时判定 */
+                    int32_t hdx = (int32_t)(sx - last_x);
+                    int32_t hdy = (int32_t)(sy - last_y);
+                    moved += (uint32_t)((hdx > 0 ? hdx : -hdx) +
+                                        (hdy > 0 ? hdy : -hdy));
+                    last_x = (int16_t)sx;
+                    last_y = (int16_t)sy;
                 } else if (!on_button || hold_btn) {
                     /* 拖动（空白区，或按住左右键后拖出按钮）。
                        增益自适应：慢慢微调时 1:1，快速滑动时放大。
@@ -550,6 +673,16 @@ static void touch_task(void *arg)
 
                 if (swallow) {
                     swallow = false;
+                } else if (home_gesture) {
+                    /* 首页滑动翻页：水平位移超过 50px 算一次翻页。
+                       手指左划（dx<0）= 下一页，右划 = 上一页。 */
+                    int16_t dx = (int16_t)(last_x - first_x);
+                    if (dx < -50) {
+                        ui_home_next_page();
+                    } else if (dx > 50) {
+                        ui_home_prev_page();
+                    }
+                    home_gesture = false;
                 } else if (hold_btn) {
                     /* 松开左右键 */
                     hid_mouse_button(hold_btn, false);
@@ -573,6 +706,7 @@ static void touch_task(void *arg)
                 }
                 on_button = false;
                 pressed_btn = UI_BTN_NONE;
+                home_gesture = false;
             }
         }
         /* 息屏后把采样降到 150ms：I2C 轮询是空闲时的主要耗电项，
@@ -619,7 +753,7 @@ static void hid_monitor_task(void *arg)
             switch (st) {
             case UI_CONN_CONNECTED:
                 ui_show_action("已连接", "点屏幕按钮即可操作");
-                ui_set_footer("实体键=空格  轻点=左键");
+                ui_set_footer("左右滑动选功能，点 icon 打开");
                 break;
             case UI_CONN_PAIRING:
                 /* 区分「主机未订阅」与「还没配好」，给出可操作的提示 */
@@ -733,6 +867,12 @@ void app_main(void)
 
     /* 串口命令行：红外码备份 + WiFi/OTA 配置（idf.py monitor 里敲 ir/wifi/ota） */
     cli_start();
+
+    /* 导航提醒 HTTP 服务器（:8080）。失败只是「导航提醒」页收不到推送，
+       其余功能不受影响。 */
+    if (nav_alert_init() != ESP_OK) {
+        ESP_LOGW(TAG, "nav server init failed (导航提醒不可用)");
+    }
 
     /* WiFi + OTA（失败不影响其它功能，只是「升级」按钮不可用） */
     if (ota_update_init() != ESP_OK) {

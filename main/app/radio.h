@@ -45,6 +45,9 @@ void radio_prev(void);
 /** 播放/停止当前台 */
 void radio_toggle(void);
 
+/** 台列表点选：直接播放指定台（正在播放则无缝切换） */
+void radio_select(int idx);
+
 /** 强制停止播放（退出电台页面时用） */
 void radio_stop(void);
 

@@ -14,12 +14,34 @@
 #include "driver/uart_vfs.h"
 
 #include "ir_backup.h"
+#include "nav_alert.h"
 #include "ota_update.h"
 #include "radio.h"
 
 static const char *TAG = "cli";
 
 static esp_console_repl_t *s_repl;
+
+/* nav <text>：模拟一条导航推送（测试导航提醒页/提示音） */
+static int cmd_nav(int argc, char **argv)
+{
+    if (argc < 2) {
+        char ip[24];
+        nav_alert_get_ip(ip, sizeof(ip));
+        printf("usage: nav <text>   (http://%s:8080/nav?text=...)\n", ip);
+        return 1;
+    }
+    /* 拼接所有参数为一句（空格分隔） */
+    char text[96] = {0};
+    for (int i = 1; i < argc; i++) {
+        strlcat(text, argv[i], sizeof(text));
+        if (i < argc - 1) {
+            strlcat(text, " ", sizeof(text));
+        }
+    }
+    nav_alert_push(text);
+    return 0;
+}
 
 esp_err_t cli_start(void)
 {
@@ -33,6 +55,14 @@ esp_err_t cli_start(void)
         ESP_LOGW(TAG, "ir_backup register failed: %s", esp_err_to_name(err));
     }
     radio_register_cli();
+
+    esp_console_cmd_t nav_cmd = {
+        .command = "nav",
+        .help = "push a fake navigation alert: nav <text>",
+        .hint = "<text>",
+        .func = cmd_nav,
+    };
+    esp_console_cmd_register(&nav_cmd);
     /* ota_update_init 里会注册 wifi/ota 命令（app_main 已调用） */
 
     esp_console_dev_uart_config_t uart_cfg = {

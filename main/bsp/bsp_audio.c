@@ -292,6 +292,11 @@ esp_err_t bsp_audio_write(const int16_t *pcm, size_t samples)
     return (err == ESP_OK && written == bytes) ? ESP_OK : ESP_FAIL;
 }
 
+bool bsp_audio_busy(void)
+{
+    return s_inited && s_started;
+}
+
 esp_err_t bsp_audio_stop(void)
 {
     if (!s_inited || !s_started) {

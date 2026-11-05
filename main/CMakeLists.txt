@@ -21,10 +21,12 @@ idf_component_register(
         "app/ir_backup.c"
         "app/ota_update.c"
         "app/radio.c"
+        "app/nav_alert.c"
         "app/cli.c"
         "app/power_mgr.c"
         "ui/ui.c"
         "ui/ui_font.c"
+        "ui/bg_radio.c"
         "hid/hid_device.c"
         # ESP-IDF 官方 BLE HID profile 层（Unlicense / CC0-1.0）
         "hid/esp_hidd_prf_api.c"
@@ -55,6 +57,7 @@ idf_component_register(
         esp_event
         esp_http_client
         esp_https_ota
+        esp_http_server
         app_update
         esp_app_format
         console

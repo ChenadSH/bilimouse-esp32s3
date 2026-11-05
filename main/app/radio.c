@@ -24,6 +24,7 @@
 #include <strings.h>
 
 #include "esp_crt_bundle.h"
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
@@ -50,10 +51,15 @@ static const char *TAG = "radio";
 
 /* ==================== 状态 ==================== */
 
-static radio_station_t s_st[RADIO_MAX_STATIONS];
+/* 台结构与拉列表的文本缓冲都放 PSRAM：内部 RAM 要留给 WiFi/BLE/LCD DMA，
+   v2.4 里这三个静态数组合计近 20KB，曾直接把 esp_wifi_init 挤到 NO_MEM */
+static radio_station_t s_st[RADIO_MAX_STATIONS] EXT_RAM_BSS_ATTR;
 static int s_cnt;
 static int s_cur;
 static char s_status[48];
+
+/* 拉取 HTTP 文本的复用缓冲（台列表 ~2KB、playlist ~4KB） */
+static char s_http_body[8192] EXT_RAM_BSS_ATTR;
 
 /* 请求字：UI/串口写，radio 任务消费 */
 typedef enum {
@@ -61,6 +67,7 @@ typedef enum {
     REQ_TOGGLE,   /* 空闲=播放当前台，播放中=停止 */
     REQ_NEXT,
     REQ_PREV,
+    REQ_SELECT,   /* 播放 s_cur 指向的台（台列表点选） */
 } radio_req_t;
 static volatile radio_req_t s_req;
 
@@ -202,7 +209,7 @@ static esp_err_t radio_fetch_list(void)
     }
     esp_http_client_fetch_headers(cli);
 
-    static char body[8192];
+    char *body = s_http_body;
     int n = 0, r;
     while (n < (int)sizeof(body) - 1 &&
            (r = esp_http_client_read(cli, body + n, sizeof(body) - 1 - n)) > 0) {
@@ -213,8 +220,7 @@ static esp_err_t radio_fetch_list(void)
     if (n <= 0) {
         return ESP_ERR_NOT_FOUND;
     }
-    return parse_stations(body);
-}
+    return parse_stations(body);}
 
 /* ==================== 播放源（MP3 直连 / HLS） ==================== */
 
@@ -270,7 +276,7 @@ static int fetch_playlist(const char *url, char *segs, int max_segs, int *seg_cn
     }
     esp_http_client_fetch_headers(cli);
 
-    static char text[8192];
+    char *text = s_http_body;
     int n = 0, r;
     while (n < (int)sizeof(text) - 1 &&
            (r = esp_http_client_read(cli, text + n, sizeof(text) - 1 - n)) > 0) {
@@ -463,7 +469,7 @@ static play_result_t play_station(int idx)
 
     while (true) {
         /* 帧边界处理请求（换台/停止最迟约 26ms 响应） */
-        if (s_req == REQ_TOGGLE) {
+        if (s_req == REQ_TOGGLE || s_req == REQ_SELECT) {
             s_req = REQ_NONE;
             result = PLAY_STOPPED;
             break;
@@ -599,6 +605,10 @@ static void radio_task(void *arg)
                 break;
             }
         }
+        /* 播放中点了台列表选台：立即重新进入播放（新台已写入 s_cur） */
+        if (s_req == REQ_SELECT) {
+            continue;
+        }
         if (s_status[0] && strcmp(s_status, "已停止") != 0 &&
             strncmp(s_status, "直播中断", 4) != 0 && strcmp(s_status, "解码失败") != 0) {
             set_status("已停止");
@@ -691,6 +701,17 @@ void radio_toggle(void)
 {
     ensure_task();
     s_req = REQ_TOGGLE;
+}
+
+void radio_select(int idx)
+{
+    if (idx < 0 || idx >= s_cnt) {
+        return;
+    }
+    ensure_task();
+    s_cur = idx;
+    s_req = REQ_SELECT;
+    show_station("准备播放");
 }
 
 void radio_stop(void)

@@ -24,12 +24,22 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/** 升级进度快照（升级页面显示用） */
+typedef struct {
+    char stage[24];    /* 空闲/连接WiFi/检查清单/下载中/失败/完成 */
+    char detail[48];   /* 补充说明（版本号/失败原因） */
+    int  percent;      /* 0..100，未知为 -1 */
+    int  total_kb;     /* OTA 包总大小（KB），未知为 0 */
+    int  done_kb;      /* 已下载（KB） */
+} ota_progress_t;
 
 /** 初始化 WiFi 子系统（不连接，连接在首次需要时发生）。幂等。 */
 esp_err_t ota_update_init(void);
@@ -39,6 +49,9 @@ bool ota_update_wifi_connected(void);
 
 /** 阻塞确保 WiFi 在线（未连则按凭据序列尝试）。电台等模块共用。 */
 esp_err_t ota_update_wifi_online(void);
+
+/** 读取升级进度（升级任务在后台写，这里拷一份快照） */
+void ota_update_get_progress(ota_progress_t *out);
 
 /**
  * 手动升级入口（屏幕「升级」按钮）：独立任务里执行

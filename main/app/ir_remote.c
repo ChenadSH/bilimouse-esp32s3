@@ -17,6 +17,7 @@
 
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -71,10 +72,13 @@ typedef struct {
     ir_slot_t slots[IR_SLOT_V1_COUNT];
 } ir_bank_v2_l4_t;
 
-static ir_bank_t s_bank;
-static ir_bank_t s_tmp_a;       /* 放静态区：两份 bank 合计 ~8KB，别塞栈 */
-static ir_bank_t s_tmp_b;
-static ir_bank_v2_l4_t s_tmp_v2;
+/* 四个 bank 结构合计 ~14KB：放 PSRAM（EXT_RAM_BSS），内部 RAM 留给
+   WiFi/BLE/LCD DMA——曾经把这俩挤到 esp_wifi_init NO_MEM。
+   bank 只被 CPU 逐字段访问，PSRAM 无性能问题；RMT 发射用独立内部缓冲。 */
+static ir_bank_t s_bank EXT_RAM_BSS_ATTR;
+static ir_bank_t s_tmp_a EXT_RAM_BSS_ATTR;
+static ir_bank_t s_tmp_b EXT_RAM_BSS_ATTR;
+static ir_bank_v2_l4_t s_tmp_v2 EXT_RAM_BSS_ATTR;
 static uint8_t   s_active;
 static bool      s_ready;
 
@@ -126,7 +130,7 @@ static bool nvs_load(ir_bank_t *out)
 /** 从 v1 老格式迁移（升级固件后第一次启动跑一次） */
 static bool migrate_v1(ir_bank_t *out)
 {
-    static ir_bank_v1_t v1 __attribute__((aligned(4)));
+    static ir_bank_v1_t v1 EXT_RAM_BSS_ATTR __attribute__((aligned(4)));
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
         return false;

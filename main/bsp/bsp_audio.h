@@ -39,6 +39,9 @@ esp_err_t bsp_audio_write(const int16_t *pcm, size_t samples);
 /** 停止播放：静音 + 关功放（保留 I2S 通道，避免频繁重建）。 */
 esp_err_t bsp_audio_stop(void);
 
+/** 是否处于播放状态（电台在播时导航提示音会选择跳过，避免抢 I2S） */
+bool bsp_audio_busy(void);
+
 /** 音量 0~100（存 NVS，重启保持） */
 esp_err_t bsp_audio_volume_set(int vol);
 int bsp_audio_volume_get(void);

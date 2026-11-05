@@ -130,6 +130,13 @@ static int creds_collect(wifi_cred_t *list, int max, bool *nvs_used)
             n++;
         }
     }
+    if (n < max) {
+        strlcpy(list[n].ssid, CONFIG_BILIMOUSE_WIFI_SSID3, sizeof(list[n].ssid));
+        strlcpy(list[n].pass, CONFIG_BILIMOUSE_WIFI_PASS3, sizeof(list[n].pass));
+        if (list[n].ssid[0] != '\0') {
+            n++;
+        }
+    }
     return n;
 }
 
@@ -314,6 +321,26 @@ static esp_err_t manifest_fetch(ota_manifest_t *m)
 
 /* ==================== 升级执行 ==================== */
 
+/* 升级进度（升级页面显示用）：ota 任务写，UI 读。
+   各字段都是对齐字，无需加锁。 */
+static ota_progress_t s_prog;
+
+void ota_update_get_progress(ota_progress_t *out)
+{
+    if (out) {
+        *out = s_prog;
+    }
+}
+
+static void prog_set(const char *stage, const char *detail)
+{
+    strlcpy(s_prog.stage, stage, sizeof(s_prog.stage));
+    if (detail) {
+        strlcpy(s_prog.detail, detail, sizeof(s_prog.detail));
+    }
+    ui_mark_dirty();
+}
+
 /** 下载 + 写 flash + 切启动分区。成功不返回（重启）。 */
 static esp_err_t ota_perform(const ota_manifest_t *m)
 {
@@ -329,9 +356,11 @@ static esp_err_t ota_perform(const ota_manifest_t *m)
     };
 
     esp_https_ota_handle_t h = NULL;
+    prog_set("下载中", "连接升级服务器…");
     esp_err_t err = esp_https_ota_begin(&ota_cfg, &h);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ota begin failed: %s", esp_err_to_name(err));
+        prog_set("失败", "连接升级服务器失败");
         return err;
     }
 
@@ -341,13 +370,16 @@ static esp_err_t ota_perform(const ota_manifest_t *m)
         if (esp_https_ota_get_image_len_read(h) >= (int)sizeof(esp_image_header_t) + (int)sizeof(esp_image_segment_header_t) &&
             esp_https_ota_get_img_desc(h, &desc) == ESP_OK) {
             ESP_LOGI(TAG, "remote image version: %s", desc.version);
-            ui_show_action("升级中", desc.version);
+            prog_set("下载中", desc.version);
         }
         int total = esp_https_ota_get_image_size(h);
         int read = esp_https_ota_get_image_len_read(h);
+        s_prog.total_kb = total / 1024;
+        s_prog.done_kb = read / 1024;
         if (total > 0) {
+            s_prog.percent = read * 100 / total;
             char sub[64];
-            snprintf(sub, sizeof(sub), "下载 %d%%", read * 100 / total);
+            snprintf(sub, sizeof(sub), "下载 %d%%", s_prog.percent);
             ui_show_action("升级中", sub);
             power_mgr_notify_activity();   /* 别让屏幕在升级途中睡着 */
         }
@@ -356,6 +388,7 @@ static esp_err_t ota_perform(const ota_manifest_t *m)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ota download failed: %s", esp_err_to_name(err));
         esp_https_ota_abort(h);
+        prog_set("失败", "下载中断，旧固件继续运行");
         return err;
     }
 
@@ -364,10 +397,13 @@ static esp_err_t ota_perform(const ota_manifest_t *m)
         ESP_LOGE(TAG, "ota finish failed: %s", esp_err_to_name(err));
         if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
             ESP_LOGE(TAG, "image validation failed - keeping old firmware");
+            prog_set("失败", "固件校验失败，旧固件继续运行");
         }
         return err;
     }
     ESP_LOGI(TAG, "ota complete, boot partition switched");
+    s_prog.percent = 100;
+    prog_set("完成", "校验通过，准备重启");
     return ESP_OK;
 }
 
@@ -379,13 +415,16 @@ static void ota_run(bool auto_triggered)
     power_mgr_notify_activity();
 
     /* ---- 1. 确保 WiFi 在线 ---- */
+    memset(&s_prog, 0, sizeof(s_prog));
     if (!ota_update_wifi_connected()) {
+        prog_set("连接WiFi", "正在连接…");
         if (!auto_triggered) {
             ui_show_action("检查更新", "连接 WiFi 中");
         }
         esp_err_t e = wifi_ensure_connected();
         if (e != ESP_OK) {
             ESP_LOGW(TAG, "wifi connect failed: %s", esp_err_to_name(e));
+            prog_set("失败", "WiFi 连接失败");
             if (!auto_triggered) {
                 ui_show_action("检查更新失败",
                                e == ESP_ERR_INVALID_STATE ? "未配置 WiFi" : "连接超时");
@@ -396,9 +435,11 @@ static void ota_run(bool auto_triggered)
     }
 
     /* ---- 2. 拉取版本清单 ---- */
+    prog_set("检查清单", "获取版本信息…");
     ota_manifest_t m;
     esp_err_t e = manifest_fetch(&m);
     if (e != ESP_OK) {
+        prog_set("失败", "无法获取清单");
         if (!auto_triggered) {
             ui_show_action("检查更新失败", "无法获取清单");
             ui_set_footer("串口: ota url <manifest 地址>");
@@ -411,6 +452,7 @@ static void ota_run(bool auto_triggered)
     int cmp = semver_cmp(m.version, cur->version);
     if (cmp <= 0) {
         ESP_LOGI(TAG, "firmware up to date (%s)", cur->version);
+        prog_set("已是最新", cur->version);
         if (!auto_triggered) {
             char sub[64];
             snprintf(sub, sizeof(sub), "当前 %s 已是最新", cur->version);
@@ -427,6 +469,9 @@ static void ota_run(bool auto_triggered)
 
     /* ---- 4. 下载写入备槽 ---- */
     if (ota_perform(&m) != ESP_OK) {
+        if (strcmp(s_prog.stage, "失败") != 0) {
+            prog_set("失败", "旧固件继续运行");
+        }
         ui_show_action("升级失败", "旧固件继续运行");
         ui_set_footer("原因见串口日志");
         return;

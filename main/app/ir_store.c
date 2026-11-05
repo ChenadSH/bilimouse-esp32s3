@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_rom_crc.h"
@@ -22,8 +23,9 @@ typedef struct {
 
 static const esp_partition_t *s_part;
 
-/* 读写用的对齐暂存区（esp_partition 要求 4 字节对齐、放内部 RAM） */
-static uint8_t s_io[IR_STORE_MAX_REC] __attribute__((aligned(4)));
+/* 读写用的对齐暂存区。esp_partition 读写本身允许 PSRAM 源（内部走 memcpy），
+   放 PSRAM 省下 4KB 内部 RAM 给 WiFi/LCD DMA。 */
+static uint8_t s_io[IR_STORE_MAX_REC] EXT_RAM_BSS_ATTR __attribute__((aligned(4)));
 
 static inline uint32_t rec_crc(const void *buf, size_t len)
 {
