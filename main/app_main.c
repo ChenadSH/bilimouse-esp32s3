@@ -115,7 +115,7 @@ static void ir_learn_task(void *arg)
     s_ir_learning = false;
     if (e == ESP_OK) {
         ir_refresh("已学会");
-        ui_set_footer("点「发射」试试");
+        ui_set_footer("已写入 flash，重启/重烧固件都不丢");
     } else {
         ir_refresh("没收到信号");
         ui_set_footer("靠近一点，确认接收头接 GPIO11");

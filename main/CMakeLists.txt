@@ -16,6 +16,7 @@ idf_component_register(
         "app/calibrate.c"
         "app/touch_cal.c"
         "app/ir_remote.c"
+        "app/ir_store.c"
         "app/power_mgr.c"
         "ui/ui.c"
         "ui/ui_font.c"
@@ -38,6 +39,7 @@ idf_component_register(
         esp_driver_spi
         esp_driver_ledc
         esp_driver_rmt
+        esp_partition
         esp_lcd
         esp_timer
 )

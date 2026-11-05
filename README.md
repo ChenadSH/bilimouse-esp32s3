@@ -54,7 +54,12 @@ idf.py build && idf.py -p /dev/ttyUSB0 flash monitor
 |---|---|
 | macOS | 系统设置 → 蓝牙 → BiliMouse 右侧 `⋯` → **移除设备**；再把蓝牙开关关掉 10 秒后重开，然后重新配对 |
 | Windows | 设置 → 蓝牙和设备 → BiliMouse → **删除设备**，再重新「添加设备」 |
-| 通用 | 设备端串口执行 `idf.py erase-flash` 可连同配对记录一起清空（会丢校准数据） |
+| 通用 | 设备端串口执行 `idf.py erase-flash` 可连同配对记录一起清空（**注意：会连校准数据和红外学习码一起物理抹掉**；只想清配对请用上表前两种方式） |
+
+> **烧录不会丢数据**：`idf.py flash` 只写 bootloader / 分区表 / app，
+> 不动 `nvs`（0x9000）和 `irbank`（0x200000），所以校准、设置、红外学习码
+> 重新烧录固件后都还在。会丢的只有两种操作：
+> ① `idf.py erase-flash`（整片擦除）；② 改动 `partitions.csv` 里 `nvs` 的 offset。
 
 排查用的关键日志（`idf.py monitor`）：
 
@@ -190,7 +195,8 @@ bilimouse-esp32s3/
 │       ├── hid_device.[ch]    HID 应用层（状态机 + 报告发送）
 │       └── esp_hidd_*.c/h     ESP-IDF 官方 BLE HID profile（Unlicense）
 ├── tests/
-│   └── test_button_fsm.py     手势状态机单元测试
+│   ├── test_button_fsm.py     手势状态机单元测试
+│   └── test_ir_store.py       红外 A/B 扇区存储的掉电/擦除用例
 ├── tools/
 │   ├── gen_font.py            中文字库生成器
 │   ├── env.bat / env.sh       ESP-IDF 环境
@@ -203,8 +209,11 @@ bilimouse-esp32s3/
 ## 测试
 
 ```bash
-# 手势状态机单元测试（12 项）
+# 手势状态机单元测试（15 项）
 python tests/test_button_fsm.py
+
+# 红外码存储（A/B 扇区、掉电、CRC）6 项
+python tests/test_ir_store.py
 ```
 
 测试会自动选择编译后端：

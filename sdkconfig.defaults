@@ -33,6 +33,13 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 
+# ---- 分区表 ----
+# 必须用自定义表：默认的 single-app 表没有 irbank 分区，
+# 红外学习到的遥控器码就只有 NVS 一份副本（易被擦掉）。
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
 # ---- FATFS ----
 # IDF v6 的 fatfs 组件默认不带这些 Kconfig 值，需显式声明，
 # 否则 ffconf.h 会引用未定义的 CONFIG_FATFS_USE_LABEL 导致编译失败。

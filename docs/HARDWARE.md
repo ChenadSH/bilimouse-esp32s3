@@ -83,6 +83,20 @@ I2S: MCLK=GPIO38, WS=GPIO13, BCLK=GPIO14, DIN=GPIO12, DOUT=GPIO45
 - 帧结束判定：最后一个跳变后静默 40ms（`signal_range_max_ns`）自动收尾，无中断参与；
 - 学习上限 96 symbol / 帧——标准 NEC（67 symbol）没问题，超长空调码可能截尾。
 
+### Flash 分区（v2.1 起使用自定义表 `partitions.csv`）
+
+| 分区 | 偏移 | 大小 | 用途 |
+|---|---|---|---|
+| `nvs` | **0x9000** | 24KB | 设置 / 触摸校准 / 红外码主副本 |
+| `phy_init` | 0xf000 | 4KB | RF 校准 |
+| `factory` | 0x10000 | 1984KB | 应用（~834KB，余 58%） |
+| `irbank` | **0x200000** | 64KB | 红外码镜像区（自定义 data 子类型 `0x40`） |
+
+**不要改动 `nvs` / `irbank` 的 offset，也不要让它们自动排布**：
+偏移一变，用户已经存在那里的数据就再也读不回来了。
+`irbank` 内部用两个 4KB 扇区 A/B 轮换（`main/app/ir_store.c`），
+每条记录 = `magic + seq + len + CRC32`，写一半掉电也能从另一页恢复。
+
 ---
 
 ## 3. PCA9557 IO 扩展

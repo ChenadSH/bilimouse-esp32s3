@@ -1,9 +1,16 @@
-﻿# BiliMouse 分区表
-# 16MB Flash: 双 OTA + NVS + 存储
-# Name,   Type, SubType, Offset,  Size, Flags
-nvs,      data, nvs,     0x9000,  0x6000,
-phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 0x300000,
-ota_0,    app,  ota_0,   ,        0x300000,
-ota_1,    app,  ota_1,   ,        0x300000,
-otadata,  data, ota,     ,        0x2000,
+﻿# BiliMouse 分区表（16MB Flash）
+#
+# ⚠️ 改这个文件前必读：
+#   nvs 和 irbank 的 offset 是**写死的**，不要随手改动，也不要让它们浮动。
+#   一旦偏移变化，原来存在那里的遥控器码就再也读不到了。
+#   新增分区请往后追加，已有分区的 offset 一律保持原值。
+#
+# irbank：红外码镜像区（自定义 data 子类型 0x40）。
+#         两个 4KB 扇区 A/B 轮换写，与 NVS 里的副本互为备份，
+#         任意一边被擦除都能从另一边自愈。
+#
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x1f0000,
+irbank,   data, 0x40,    0x200000, 0x10000,
