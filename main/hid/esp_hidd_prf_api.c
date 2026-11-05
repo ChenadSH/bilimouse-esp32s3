@@ -128,7 +128,7 @@ void esp_hidd_send_keyboard_value(uint16_t conn_id, key_mask_t special_key_mask,
     return;
 }
 
-void esp_hidd_send_mouse_value(uint16_t conn_id, uint8_t mouse_button, int8_t mickeys_x, int8_t mickeys_y)
+esp_err_t esp_hidd_send_mouse_value(uint16_t conn_id, uint8_t mouse_button, int8_t mickeys_x, int8_t mickeys_y)
 {
     uint8_t buffer[HID_MOUSE_IN_RPT_LEN];
 
@@ -138,9 +138,15 @@ void esp_hidd_send_mouse_value(uint16_t conn_id, uint8_t mouse_button, int8_t mi
     buffer[2] = mickeys_y;           // Y
     buffer[3] = 0;           // Wheel
 
-    hid_dev_send_report(hidd_le_env.gatt_if, conn_id,
+    esp_err_t err = hid_dev_send_report(hidd_le_env.gatt_if, conn_id,
                         HID_RPT_ID_MOUSE_IN, HID_REPORT_TYPE_INPUT, HID_MOUSE_IN_RPT_LEN, buffer);
-    return;
+    /* 发送失败绝不静默：congestion/断连时用户看到的就是"主机没反应"，
+       串口里必须能看到原因。 */
+    if (err != ESP_OK) {
+        ESP_LOGW(HID_LE_PRF_TAG, "mouse report lost (btn=0x%02x dx=%d dy=%d): %s",
+                 mouse_button, mickeys_x, mickeys_y, esp_err_to_name(err));
+    }
+    return err;
 }
 
 /* BiliMouse 扩展：把「主机已订阅输入报告」的状态上报给应用层 */

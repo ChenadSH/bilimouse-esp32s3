@@ -160,7 +160,7 @@ void esp_hidd_send_consumer_value(uint16_t conn_id, uint8_t key_cmd, bool key_pr
 
 void esp_hidd_send_keyboard_value(uint16_t conn_id, key_mask_t special_key_mask, uint8_t *keyboard_cmd, uint8_t num_key);
 
-void esp_hidd_send_mouse_value(uint16_t conn_id, uint8_t mouse_button, int8_t mickeys_x, int8_t mickeys_y);
+esp_err_t esp_hidd_send_mouse_value(uint16_t conn_id, uint8_t mouse_button, int8_t mickeys_x, int8_t mickeys_y);
 
 /**
  * @brief 通知应用层：主机是否已订阅输入报告

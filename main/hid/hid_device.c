@@ -480,7 +480,9 @@ esp_err_t hid_mouse_button(uint8_t button, bool down)
     } else {
         s_btn_mask &= (uint8_t)~button;
     }
-    esp_hidd_send_mouse_value(s_conn_id, s_btn_mask, 0, 0);
+    esp_err_t err = esp_hidd_send_mouse_value(s_conn_id, s_btn_mask, 0, 0);
+    ESP_LOGI(TAG, "mouse btn 0x%02x %s (mask=0x%02x, %s)", button,
+             down ? "down" : "up", s_btn_mask, esp_err_to_name(err));
     return ESP_OK;
 }
 
@@ -549,22 +551,22 @@ esp_err_t hid_mouse_click(uint8_t button)
         return ESP_ERR_INVALID_STATE;
     }
     /*
-     * 一次可靠的单击 = 带位移的按下 + 反向位移抵消 + 延时后释放。
+     * 标准蓝牙鼠标的点击就是两次纯按键报告（零位移）：
+     *   down(0,0) -> 保持几十毫秒 -> up(0,0)
      *
-     * 三个必须同时满足的条件（缺一个就会"串口有日志、主机没反应"）：
-     *   1. 报告长度必须等于描述符声明的字节数（本工程 4 字节，见上方宏）；
-     *      长度不符时主机会整包丢弃，移动也会一起失效。
-     *   2. 按下状态必须保持足够久。macOS 会折叠间隔过近的 HID 报告，
-     *      down/up 只隔 30ms 时经常被折叠成"什么都没发生"，这里按住约 60ms。
-     *   3. 报告里要带一点位移。部分主机的 HID 事件管线只在有位移时才派发，
-     *      纯按键变化（dx=dy=0）的报告会被当成空报告折叠。这里先 +1px
-     *      再用 -1px 抵消，净位移为 0，光标不会漂移。
+     * 历史教训，防止以后有人"优化"回去：
+     *   - 早期"点击无效"的真根因是报告 5 字节 vs 描述符 4 字节，
+     *     整包被主机丢弃 —— 和按住时长、抖动都无关；
+     *   - v2.x 曾加过 ±1px 位移抖动来绕"报告折叠"，但 Apple 的
+     *     事件管线把"按住期间有位移"归为拖拽，带位移的 down/up
+     *     反而会让点击变成一次 0px 拖拽（macOS/iOS 点击失效）。
+     *     BleMouse 等在 macOS/iOS 上验证可用的实现都是纯按键报告。
+     *   - 按住时长保留 40ms：太短（<10ms）仍可能被采样间隔吞掉。
      */
-    esp_hidd_send_mouse_value(s_conn_id, button, 1, 0);
-    vTaskDelay(pdMS_TO_TICKS(12));
-    esp_hidd_send_mouse_value(s_conn_id, button, -1, 0);
-    vTaskDelay(pdMS_TO_TICKS(48));
+    esp_hidd_send_mouse_value(s_conn_id, button, 0, 0);
+    vTaskDelay(pdMS_TO_TICKS(40));
     esp_hidd_send_mouse_value(s_conn_id, 0, 0, 0);
+    ESP_LOGI(TAG, "mouse click btn=0x%02x", button);
     return ESP_OK;
 }
 
