@@ -11,6 +11,8 @@
 #include "esp_console.h"
 #include "esp_log.h"
 
+#include "driver/uart_vfs.h"
+
 #include "ir_backup.h"
 #include "ota_update.h"
 
@@ -38,13 +40,20 @@ esp_err_t cli_start(void)
         .tx_gpio_num = -1,
     };
     esp_console_repl_config_t repl_cfg = {
-        .max_history_len = 0,          /* 不要历史 */
+        /* linenoise 拒绝 len<1：max_history_len=0 会让 REPL 创建中途失败，
+           而 IDF 的清理路径只删 UART 驱动不切回 VFS nonblocking 模式，
+           之后所有日志写入都报错并递归打日志 -> 栈爆 -> 重启循环。
+           所以这里用 1（等效"无历史"），绝不能用 0。 */
+        .max_history_len = 1,
         .prompt = "bilimouse> ",
         .max_cmdline_length = 1024,    /* 单槽导出行 ~516 字符 */
     };
 
     err = esp_console_new_repl_uart(&uart_cfg, &repl_cfg, &s_repl);
     if (err != ESP_OK) {
+        /* 防护：万一创建失败，把 VFS 切回 nonblocking，否则驱动已删
+           而日志还往驱动写，会在 uart_write_bytes 里无限递归崩溃 */
+        uart_vfs_dev_use_nonblocking(0);
         ESP_LOGW(TAG, "repl create failed: %s", esp_err_to_name(err));
         return err;
     }
