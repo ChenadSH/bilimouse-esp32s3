@@ -170,21 +170,31 @@ GitHub 的 HTTPS，不需要任何后端代码。**一个纯静态仓库就够**
    或 git push），然后**只改 `manifest.json` 里的 `version` 和 `url` 两个字符串**，  
    提交即可。设备下次点「升级」就会拿到新版本。
 
-#### 方式 B：GitHub Releases（不用每次改仓库文件）
+#### 方式 B：GitHub Releases（✅ 当前采用，不用每次改仓库文件）
 
-1. 在固件仓库打 release：`Releases → Draft a new release`，tag 填  
-   `v2.4.0`，把 `bilimouse.bin` 和一份 `manifest.json` 作为附件上传：
+> **已上线**：仓库 `ChenadSH/bilimouse-esp32s3` 的 release 同时挂
+> `bilimouse.bin` + `manifest.json` 两个附件，设备出厂默认地址已指向它
+> （Kconfig `BILIMOUSE_OTA_URL`），烧录即用，无需串口配置。
+
+1. **设备端 manifest 地址（永久链接，永远指向最新 release）**：
+   ```
+   https://github.com/ChenadSH/bilimouse-esp32s3/releases/latest/download/manifest.json
+   ```
+2. manifest 内容（`url` 同样用永久链接，指向最新 release 的 bin）：
    ```json
    {
      "version": "2.4.0",
-     "url": "https://github.com/yourname/bilimouse-ota/releases/latest/download/bilimouse.bin",
+     "url": "https://github.com/ChenadSH/bilimouse-esp32s3/releases/latest/download/bilimouse.bin",
      "notes": "..."
    }
    ```
-2. `releases/latest/download/<文件名>` 是 GitHub 提供的**永久重定向链接**，  
-   永远指向最新 release 的同名附件。把这个链接（manifest 或 bin 均可）  
-   填给设备即可，以后发新版本只需要传新 release，什么都不用改。  
-   设备端 `esp_http_client` 默认跟随 302 重定向。
+3. `releases/latest/download/<文件名>` 是 GitHub 提供的**永久重定向链接**，
+   永远指向最新 release 的同名附件。以后发新版本**只需要传新 release**
+   （把新版 manifest.json 和 bilimouse.bin 挂上去），什么都不用改。
+   设备端 `esp_http_client` 默认跟随 302 重定向（已实测可用）。
+4. **一键发版**：`python tools/release.py 2.4.0 "更新说明"` ——
+   自动改版本号、编译、创建 release、上传两个附件（需 `GITHUB_TOKEN`
+   环境变量或交互输入 PAT）。
 
 #### 方式 C：GitHub Pages（链接最短）
 
@@ -196,8 +206,8 @@ GitHub 的 HTTPS，不需要任何后端代码。**一个纯静态仓库就够**
 
 | 方式         | 每次发版的动作                | 适用                |
 | ---------- | ---------------------- | ----------------- |
-| A 独立仓库     | 传 .bin + 改 manifest 两行 | **最直观，推荐**        |
-| B Releases | 只传新 release            | 版本多、嫌改 manifest 烦 |
+| B Releases | 只传新 release（✅ 已采用）    | 版本多、零维护，当前方案 |
+| A 独立仓库     | 传 .bin + 改 manifest 两行 | 最直观               |
 | C Pages    | git push               | 想要好看的固定域名         |
 
 > 注意：仓库必须**公开**（私有仓库的 raw 链接需要 token）。WiFi 凭据  
@@ -285,13 +295,25 @@ ota_run()
 
 ### 3.4 发布新版本的操作步骤
 
+一键发版（推荐）：
+
+```
+set GITHUB_TOKEN=ghp_xxx          （repo 权限的 PAT）
+python tools/release.py 2.4.0 "修复xxx、新增yyy"
+```
+
+脚本自动完成：改 `CMakeLists.txt` 版本号 → 编译 → 建 GitHub release
+`v2.4.0` → 上传 `bilimouse.bin` + `manifest.json` → 提交推送。
+
+手动等价流程：
+
 1. 改两处版本号：`CMakeLists.txt` 的 `PROJECT_VER`、  
    `docs/PRD.md` 版本行；
 2. 编译：`tools\build.bat D:\pro\bilimouse-esp32s3 build`；
-3. 把 `build\bilimouse.bin` 复制进 publish 目录并按版本改名；
-4. 更新 `manifest.json` 的 `version` 和 `url`；
-5. 完成。在线设备最迟下一次开机 30 秒后自动升级；  
-   急用就让设备点一下「升级」。
+3. GitHub 新建 release `v2.4.0`，上传两个附件：`build\bilimouse.bin`
+   和一份 `manifest.json`（version/url/notes 三个字段，url 用
+   `releases/latest/download/bilimouse.bin` 永久链接）；
+4. 完成。在线设备点「升级」即拿到新版本（急用直接点按钮）。
 
 ### 3.5 常见问题
 

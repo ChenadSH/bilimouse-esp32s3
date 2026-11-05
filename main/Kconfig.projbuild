@@ -15,7 +15,7 @@ menu "BiliMouse"
 
     config BILIMOUSE_OTA_URL
         string "OTA manifest 地址"
-        default "https://raw.githubusercontent.com/CHANGE-ME/bilimouse-ota/main/manifest.json"
+        default "https://github.com/ChenadSH/bilimouse-esp32s3/releases/latest/download/manifest.json"
         help
             固件版本清单（JSON）的 URL，格式与 GitHub 部署方法见 docs/OTA.md。
             可通过串口命令 `ota url <url>` 覆盖（存 NVS，优先级更高）。
