@@ -60,8 +60,28 @@ I2S: MCLK=GPIO38, WS=GPIO13, BCLK=GPIO14, DIN=GPIO12, DOUT=GPIO45
 |---|---|
 | 用户按键（BOOT 复用） | **GPIO0**，低电平按下 |
 | 板载 LED | GPIO48 |
+| 红外发射（外接） | **GPIO10**（RMT TX，38kHz 载波） |
+| 红外接收（外接） | **GPIO11**（RMT RX，输入反相已开） |
 | 扩展接口 | GPIO10, GPIO11 |
 | 下载模式 | IO46 必须保持低电平 |
+
+### 红外收发接线（v2.0 新增，BSP：`main/bsp/bsp_ir.c`）
+
+板载没有红外器件，需要外接到两个 GH1.25 扩展口：
+
+| 器件 | 接法 |
+|---|---|
+| 发射：红外发射 LED | 正极 → 100Ω 电阻 → **GPIO10**，负极 → GND；想打远（>5m）用 NPN（如 S8050）驱动：GPIO10 → 1kΩ → 基极，LED + 限流电阻接 3V3~集电极，发射极 → GND |
+| 接收：HX1838 / VS1838B | OUT → **GPIO11**，VCC → 3V3，GND → GND |
+
+技术要点：
+
+- RMT 分辨率 1MHz（1 tick = 1µs），每通道 96 symbol（收发各占 2 个 block）；
+- 发射用 `rmt_apply_carrier` 挂 38kHz 载波（占空比 33%），固件只构造"亮/灭"包络；
+- 接收开 `invert_in=true`：接收头检测到载波时输出**低电平**，反相后与发射侧
+  的 level=1 语义一致，学习到的波形可以原样回放；
+- 帧结束判定：最后一个跳变后静默 40ms（`signal_range_max_ns`）自动收尾，无中断参与；
+- 学习上限 96 symbol / 帧——标准 NEC（67 symbol）没问题，超长空调码可能截尾。
 
 ---
 

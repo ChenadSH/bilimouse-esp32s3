@@ -17,8 +17,18 @@
 // HID LED output report length
 #define HID_LED_OUT_RPT_LEN         1
 
-// HID mouse input report length
-#define HID_MOUSE_IN_RPT_LEN        5
+/*
+ * HID mouse input report length
+ *
+ * ⚠️ 必须与Report Map里鼠标collection的实际长度严格一致，否则主机
+ *    会把整包当成畸形报告丢掉——这正是"串口一切正常、电脑毫无反应"
+ *    的根因。
+ *    本项目（main/hid/hid_device_le_prf.c）的鼠标描述符是：
+ *      buttons 3bit + padding 5bit = 1 字节
+ *      X / Y / Wheel 各 8bit     = 3 字节
+ *    合计 4 字节，没有 AC Pan。官方 demo 留下的 5 在这里是错的。
+ */
+#define HID_MOUSE_IN_RPT_LEN        4
 
 // HID consumer control input report length
 #define HID_CC_IN_RPT_LEN           2
@@ -122,11 +132,11 @@ void esp_hidd_send_mouse_value(uint16_t conn_id, uint8_t mouse_button, int8_t mi
 {
     uint8_t buffer[HID_MOUSE_IN_RPT_LEN];
 
+    memset(buffer, 0, sizeof(buffer));
     buffer[0] = mouse_button;   // Buttons
     buffer[1] = mickeys_x;           // X
     buffer[2] = mickeys_y;           // Y
     buffer[3] = 0;           // Wheel
-    buffer[4] = 0;           // AC Pan
 
     hid_dev_send_report(hidd_le_env.gatt_if, conn_id,
                         HID_RPT_ID_MOUSE_IN, HID_REPORT_TYPE_INPUT, HID_MOUSE_IN_RPT_LEN, buffer);

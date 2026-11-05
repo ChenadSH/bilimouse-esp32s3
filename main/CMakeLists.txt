@@ -7,6 +7,7 @@ idf_component_register(
         "bsp/bsp_button.c"
         "bsp/bsp_imu.c"
         "bsp/bsp_touch.c"
+        "bsp/bsp_ir.c"
         "app/settings.c"
         "app/button_fsm.c"
         "app/actions.c"
@@ -14,6 +15,8 @@ idf_component_register(
         "app/pointer.c"
         "app/calibrate.c"
         "app/touch_cal.c"
+        "app/ir_remote.c"
+        "app/power_mgr.c"
         "ui/ui.c"
         "ui/ui_font.c"
         "hid/hid_device.c"
@@ -34,6 +37,7 @@ idf_component_register(
         esp_driver_i2c
         esp_driver_spi
         esp_driver_ledc
+        esp_driver_rmt
         esp_lcd
         esp_timer
 )

@@ -3,19 +3,21 @@
  * @brief BiliMouse 主程序
  *
  * 任务编排：
- *   ui_task      - 界面刷新（约 20fps）
- *   input_task   - 实体按键 -> 鼠标右键（按下/松开直通主机）
+ *   ui_task      - 界面刷新（约 20fps，息屏时暂停）
+ *   input_task   - 实体按键 -> 空格键（播放/暂停）
  *   touch_task   - 触摸：拖动 = 移动指针；轻点 = 左键；点按钮 = 执行动作
  *   hid_monitor_task - 蓝牙连接状态同步
+ *   power_task   - 空闲变暗 / 息屏
  *
- * 交互模型（第五版）：
- *   1. 实体按键 = 右键，用 Ctrl+左键 模拟（macOS 对第三方鼠标的
- *      按钮 2 不响应，Ctrl+左键 是全局可靠的右键）。
- *   2. 屏幕是触控板：任意模式空白处拖动 = 移动指针（带增益，更灵敏）。
- *      轻点一下 = 左键单击；快速点两下 = 双击（两次 30ms 的 down/up
- *      间隔远小于 macOS 双击窗口，由系统自己判定，固件不猜）。
- *   3. 每个功能都有屏上按钮，不依赖任何隐藏手势。
- *   4. 体感不再参与播放控制（床上翻身误触发太多）。
+ * 交互模型（第六版）：
+ *   1. 实体按键 = 空格。B 站网页播放器把空格绑定为播放/暂停，
+ *      比 Ctrl+左键 模拟右键可靠得多，也不依赖 macOS 的鼠标按键支持。
+ *   2. 鼠标模式：屏幕左右两侧各一个「左键 / 右键」竖长按键，
+ *      按下即按住、抬起才松开，中间区域是触控板，可按住拖拽。
+ *   3. 遥控模式：三行大按钮 + 次行的「红外」入口。
+ *   4. 屏幕轻点 = 左键单击；快速点两下 = 双击（交给主机系统判定）。
+ *   5. 红外：学习任意遥控器的原始波形，存在 NVS 里，一键回放。
+ *   6. 省电：30s 无操作变暗，90s 息屏，触摸即唤醒。
  */
 #include <stdio.h>
 #include <string.h>
@@ -32,7 +34,9 @@
 #include "bsp_touch.h"
 #include "calibrate.h"
 #include "hid_device.h"
+#include "ir_remote.h"
 #include "pointer.h"
+#include "power_mgr.h"
 #include "settings.h"
 #include "touch_cal.h"
 #include "ui.h"
@@ -60,6 +64,8 @@ static int  s_cal_shown_stage = -1;   /* 触摸校准界面当前展示的阶段
 static void perform_action(action_t action);
 static void on_ui_button(ui_button_t btn, void *ctx);
 static void start_touch_cal(void);
+static void set_mouse_mode(bool on);
+static void enter_ir_mode(void);
 
 /* ==================== 模式切换 ==================== */
 
@@ -69,11 +75,63 @@ static void set_mouse_mode(bool on)
     hid_mouse_release_all();   /* 切模式时别把主机卡在"按住"状态 */
     ui_set_mode(on ? UI_MODE_MOUSE : UI_MODE_REMOTE);
     if (on) {
-        ui_show_action("鼠标模式", "全屏当触控板");
-        ui_set_footer("拖动=移动  轻点=左键  实体键=右键");
+        ui_show_action("鼠标模式", "两侧=左右键");
+        ui_set_footer("中间拖动=移动  轻点=左键");
     } else {
         ui_show_action("遥控模式", "点屏幕按钮操作");
-        ui_set_footer("拖动=移动  实体键=右键");
+        ui_set_footer("实体键=空格  轻点=左键");
+    }
+}
+
+/* ==================== 红外遥控 ==================== */
+
+static volatile bool s_ir_learning;
+
+/** 刷新红外页面的卡片文字（槽位 / 是否已学） */
+static void ir_refresh(const char *title)
+{
+    uint8_t slot = ir_remote_active_slot();
+    char sub[48];
+    snprintf(sub, sizeof(sub), "槽 %u/%u %s 已学 %u 个",
+             (unsigned)(slot + 1), (unsigned)IR_SLOT_COUNT,
+             ir_remote_slot_loaded(slot) ? "有码" : "空",
+             (unsigned)ir_remote_loaded_count());
+    ui_show_action(title, sub);
+}
+
+/**
+ * 学习任务：捕获是阻塞的（最长 8 秒），必须放到独立任务里，
+ * 否则触摸任务会跟着卡住，连「返回」都点不动。
+ */
+static void ir_learn_task(void *arg)
+{
+    (void)arg;
+    s_ir_learning = true;
+    ir_refresh("学习中");
+    ui_set_footer("对准设备，按一下遥控器");
+
+    esp_err_t e = ir_remote_learn(8000);
+
+    s_ir_learning = false;
+    if (e == ESP_OK) {
+        ir_refresh("已学会");
+        ui_set_footer("点「发射」试试");
+    } else {
+        ir_refresh("没收到信号");
+        ui_set_footer("靠近一点，确认接收头接 GPIO11");
+    }
+    vTaskDelete(NULL);
+}
+
+static void enter_ir_mode(void)
+{
+    hid_mouse_release_all();
+    ui_set_mode(UI_MODE_IR);
+    ir_refresh("红外遥控");
+    if (!ir_remote_ready()) {
+        ui_set_footer("红外不可用：检查 GPIO10/11");
+    } else {
+        ui_set_footer("学习=复制遥控器  发射=回放");
     }
 }
 
@@ -107,6 +165,43 @@ static void on_ui_button(ui_button_t btn, void *ctx)
         break;
     case UI_BTN_TOUCH_CAL:
         start_touch_cal();
+        break;
+    case UI_BTN_IR_MODE:
+        enter_ir_mode();
+        break;
+
+    /* 红外模式 */
+    case UI_BTN_IR_LEARN:
+        if (!ir_remote_ready()) {
+            ui_show_action("红外不可用", "检查 GPIO10/11");
+        } else if (!s_ir_learning) {
+            xTaskCreate(ir_learn_task, "ir_learn", 4096, NULL, 3, NULL);
+        }
+        break;
+
+    case UI_BTN_IR_SEND: {
+        esp_err_t e = ir_remote_send();
+        if (e == ESP_OK) {
+            ir_refresh("已发射");
+        } else if (e == ESP_ERR_NOT_FOUND) {
+            ir_refresh("这个槽是空的");
+            ui_set_footer("先点「学习」录一个码");
+        } else {
+            ir_refresh("发射失败");
+        }
+        break;
+    }
+
+    case UI_BTN_IR_SLOT:
+        ir_remote_next_slot();
+        ir_refresh("切换槽位");
+        break;
+
+    case UI_BTN_IR_BACK:
+        s_mouse_mode = false;
+        ui_set_mode(UI_MODE_REMOTE);
+        ui_show_action("遥控模式", "点屏幕按钮操作");
+        ui_set_footer("实体键=空格  轻点=左键");
         break;
 
     /* 校准模式按钮 */
@@ -167,7 +262,7 @@ static void on_touch_cal_done(bool ok)
 
     if (ok) {
         ui_show_action("触摸已校准", "点按钮试试");
-        ui_set_footer("拖动=移动  实体键=右键");
+        ui_set_footer("实体键=空格  轻点=左键");
         ESP_LOGI(TAG, "touch calibration finished");
     } else {
         ui_show_action("校准未完成", "点校准按钮可重做");
@@ -220,17 +315,17 @@ static void touch_cal_sync_ui(void)
 /* ==================== 任务 ==================== */
 
 /**
- * 实体按键任务：右键（Ctrl+左键 模拟）。
+ * 实体按键任务：空格 = 播放/暂停。
  *
- * 为什么不直接发 HID 按钮 2？
- *   macOS 对很多第三方 BLE 鼠标的按钮 2 不响应，而且系统设置里
- *   没有对应的开关（用户实测"辅助点按"选项根本不存在）。
- *   而 Control+左键 是 macOS 全局公认的右键，100% 可靠。
+ * 为什么从「右键」改成空格：
+ *   1. B 站网页播放器把空格绑定为播放/暂停，而且页面级生效，
+ *      不要求焦点落在播放器上；
+ *   2. 之前的 Ctrl+左键 方案依赖 macOS 把修饰键和鼠标点击串起来判右键，
+ *      在触控板拖动、输入框聚焦等场景下行为不稳定；
+ *   3. 键盘报告只有一个字节的修饰位，没有"按住状态没清干净"的副作用。
  *
- * 时序：
- *   按下 -> Ctrl 按下
- *   松开 -> 左键按下 -> 30ms -> 左键松开 -> Ctrl 松开
- * macOS 在左键按下/松开期间一直看到 Ctrl 被按住 => 右键菜单。
+ * 按下即触发（而不是松开触发）：躺着单手按，按下就有反馈最直觉。
+ * 长按不重复触发，避免主机键盘自动重复导致播放/暂停反复横跳。
  */
 static void input_task(void *arg)
 {
@@ -240,7 +335,7 @@ static void input_task(void *arg)
     bool ready_warned = false;
 
     /* 上电时 GPIO0 常被外部拉低（进入下载模式的那颗 strapping 脚），
-       先等它稳定松开，避免一开机就给主机发一次"右键按下"。 */
+       先等它稳定松开，避免一开机就给主机发一次空格。 */
     vTaskDelay(pdMS_TO_TICKS(120));
     last = (bsp_button_get_state() == BSP_BUTTON_PRESSED);
 
@@ -256,28 +351,11 @@ static void input_task(void *arg)
                     ui_show_hint("蓝牙未就绪，按键暂不可用");
                 }
             } else if (now) {
-                /* 按下：先按住 Ctrl */
                 ready_warned = false;
-                esp_err_t e = hid_keyboard_modifier(HID_MOD_CTRL, true);
-                ESP_LOGI(TAG, "right-click: ctrl down (%s)", esp_err_to_name(e));
-                if (e == ESP_OK) {
-                    ui_show_hint("右键：Ctrl 按住，松手点击");
-                }
-            } else {
-                /* 松开：完成一次 Ctrl+左键，再放开 Ctrl。
-                   左键按下保持 80ms(同 hid_mouse_click 的原因)，
-                   左键松开后也隔 50ms 再放 Ctrl，每一步之间都留出
-                   足够间隔，避免 macOS 把相邻报告折叠掉。 */
-                esp_err_t e1 = hid_mouse_button(HID_MOUSE_BTN_LEFT, true);
-                vTaskDelay(pdMS_TO_TICKS(80));
-                esp_err_t e2 = hid_mouse_button(HID_MOUSE_BTN_LEFT, false);
-                vTaskDelay(pdMS_TO_TICKS(50));
-                esp_err_t e3 = hid_keyboard_modifier(HID_MOD_CTRL, false);
-                ESP_LOGI(TAG, "right-click: left click + ctrl up (%s %s %s)",
-                         esp_err_to_name(e1), esp_err_to_name(e2), esp_err_to_name(e3));
-                if (e1 == ESP_OK && e2 == ESP_OK) {
-                    ui_show_hint("已右键（Ctrl+左键）");
-                }
+                power_mgr_notify_activity();
+                esp_err_t e = hid_keyboard_tap(HID_KEY_SPACEBAR, HID_MOD_NONE);
+                ESP_LOGI(TAG, "button: space tap (%s)", esp_err_to_name(e));
+                ui_show_hint(e == ESP_OK ? "空格：播放/暂停" : "发送失败");
             }
         }
         vTaskDelay(pdMS_TO_TICKS(5));
@@ -306,7 +384,9 @@ static void touch_task(void *arg)
     bsp_touch_data_t t;
     bool was_pressed = false;
     bool on_button = false;      /* 本次触摸是否落在按钮上 */
+    bool swallow = false;        /* 本次触摸只用来点亮屏幕，不执行动作 */
     ui_button_t pressed_btn = UI_BTN_NONE;
+    uint8_t hold_btn = 0;        /* 当前按住的鼠标键（左/右），0=没按住 */
     int16_t last_x = 0, last_y = 0;
     uint32_t press_ms = 0;
     uint32_t moved = 0;
@@ -344,6 +424,16 @@ static void touch_task(void *arg)
 
             if (t.pressed) {
                 if (!was_pressed) {
+                    /* 息屏状态下，这一下触摸只负责点亮屏幕 —— 否则用户
+                       摸黑想找按钮，结果是直接把视频暂停了。 */
+                    power_mgr_notify_activity();
+                    if (!power_mgr_display_on()) {
+                        swallow = true;
+                        was_pressed = true;
+                        vTaskDelay(pdMS_TO_TICKS(20));
+                        continue;
+                    }
+
                     /* 触摸开始：判定是否落在按钮上 */
                     pressed_btn = ui_hit_test(sx, sy);
                     on_button = (pressed_btn != UI_BTN_NONE);
@@ -351,12 +441,24 @@ static void touch_task(void *arg)
                     last_y = (int16_t)sy;
                     press_ms = now;
                     moved = 0;
+
+                    /* 左右键是「按住型」：按下立即发 down，抬起才发 up。
+                       这样按住后往中间拖 = 拖拽/框选，和真实鼠标一致。 */
+                    if (pressed_btn == UI_BTN_MOUSE_LEFT) {
+                        hold_btn = HID_MOUSE_BTN_LEFT;
+                        hid_mouse_button(hold_btn, true);
+                        ui_show_hint("左键按住中");
+                    } else if (pressed_btn == UI_BTN_MOUSE_RIGHT) {
+                        hold_btn = HID_MOUSE_BTN_RIGHT;
+                        hid_mouse_button(hold_btn, true);
+                        ui_show_hint("右键按住中");
+                    }
 #if TOUCH_DEBUG
                     ESP_LOGI(TAG, "touch raw=(%u,%u) -> (%u,%u) btn=%d",
                              t.raw_x, t.raw_y, sx, sy, (int)pressed_btn);
 #endif
-                } else if (!on_button) {
-                    /* 拖动中（仅空白区）：移动主机指针。
+                } else if (!on_button || hold_btn) {
+                    /* 拖动（空白区，或按住左右键后拖出按钮）。
                        增益自适应：慢慢微调时 1:1，快速滑动时放大。
                        乘完增益可能超过 int8 上限(127)，按 ±127 分包连续发送。 */
                     int32_t dx = (int32_t)(sx - last_x);
@@ -392,7 +494,14 @@ static void touch_task(void *arg)
                 /* 触摸结束 */
                 was_pressed = false;
 
-                if (on_button && pressed_btn != UI_BTN_NONE) {
+                if (swallow) {
+                    swallow = false;
+                } else if (hold_btn) {
+                    /* 松开左右键 */
+                    hid_mouse_button(hold_btn, false);
+                    ui_show_hint(hold_btn == HID_MOUSE_BTN_LEFT ? "左键已松开" : "右键已松开");
+                    hold_btn = 0;
+                } else if (on_button && pressed_btn != UI_BTN_NONE) {
                     /* 「鼠标」按钮长按 = 触摸校准：触摸不正常时这是唯一
                        还能进校准的入口，所以绑在一个大按钮上而不是藏菜单 */
                     if (pressed_btn == UI_BTN_MOUSE_MODE &&
@@ -404,7 +513,7 @@ static void touch_task(void *arg)
                     }
                 } else if (moved < 12 && (now - press_ms) < 400) {
                     /* 轻点空白处 = 左键单击（鼠标/遥控模式都生效）。
-                       快速点两下 = 双击：由 macOS 在系统双击窗口内自动判定，
+                       快速点两下 = 双击：由主机在系统双击窗口内自动判定，
                        固件只管把两次干净的 down/up 发出去。 */
                     perform_action(ACTION_CLICK_LEFT);
                 }
@@ -412,7 +521,9 @@ static void touch_task(void *arg)
                 pressed_btn = UI_BTN_NONE;
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(20));
+        /* 息屏后把采样降到 150ms：I2C 轮询是空闲时的主要耗电项，
+           而唤醒只要一次触摸，慢一点完全无感。 */
+        vTaskDelay(pdMS_TO_TICKS(power_mgr_display_on() ? 20 : 150));
     }
 }
 
@@ -420,7 +531,10 @@ static void ui_task(void *arg)
 {
     (void)arg;
     while (1) {
-        ui_flush();
+        /* 息屏时完全不刷屏：省下 SPI 带宽和 CPU，也让 LEDC 背光保持 0 */
+        if (power_mgr_display_on()) {
+            ui_flush();
+        }
         vTaskDelay(pdMS_TO_TICKS(50));   /* 20fps 刷新 */
     }
 }
@@ -451,7 +565,7 @@ static void hid_monitor_task(void *arg)
             switch (st) {
             case UI_CONN_CONNECTED:
                 ui_show_action("已连接", "点屏幕按钮即可操作");
-                ui_set_footer("实体键=右键  屏幕轻点=左键");
+                ui_set_footer("实体键=空格  轻点=左键");
                 break;
             case UI_CONN_PAIRING:
                 /* 区分「主机未订阅」与「还没配好」，给出可操作的提示 */
@@ -523,6 +637,8 @@ void app_main(void)
         ui_set_button_callback(on_ui_button, NULL);
         ui_show_action("BiliMouse", "正在启动蓝牙...");
         ui_set_footer("正在启动");
+        /* 背光统一由 power_mgr 管理（读设置里的亮度 + 空闲自动变暗） */
+        power_mgr_init();
     }
 
     err = bsp_button_init();
@@ -540,6 +656,12 @@ void app_main(void)
         ESP_LOGW(TAG, "touch init failed (触摸功能不可用)");
     }
 
+    /* 红外收发（RMT）。接不接红外头都不影响其它功能，
+       初始化失败只是让「红外」按钮报不可用。 */
+    if (ir_remote_init() != ESP_OK) {
+        ESP_LOGW(TAG, "ir init failed (红外功能不可用)");
+    }
+
     err = hid_device_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "hid init failed: %s", esp_err_to_name(err));
@@ -553,6 +675,7 @@ void app_main(void)
         xTaskCreate(touch_task, "touch_task", 4096, NULL, 4, NULL);
     }
     xTaskCreate(hid_monitor_task, "hid_task", 3072, NULL, 4, NULL);
+    power_mgr_start();
 
     /* 体感（甩腕/翻转）已停用：躺在床上翻身、拿放设备都会误触发，
        实测「暂停/播放」被打断的次数远多于主动使用的次数。

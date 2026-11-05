@@ -28,9 +28,10 @@ typedef enum {
 /** 运行模式 */
 typedef enum {
     UI_MODE_REMOTE = 0,   /* 遥控模式 */
-    UI_MODE_MOUSE,        /* 鼠标模式 */
+    UI_MODE_MOUSE,        /* 鼠标模式（左右键按钮 + 中间触控板） */
     UI_MODE_CALIBRATE,    /* 校准模式 */
     UI_MODE_TOUCH_CAL,    /* 触摸校准向导 */
+    UI_MODE_IR,           /* 红外遥控（学习 / 发射） */
 } ui_mode_t;
 
 /** 触摸校准界面状态 */
@@ -53,6 +54,15 @@ typedef enum {
     UI_BTN_FULLSCREEN,       /* 全屏 */
     UI_BTN_MOUSE_MODE,       /* 鼠标模式开关 */
     UI_BTN_TOUCH_CAL,        /* 重新校准触摸 */
+    UI_BTN_IR_MODE,          /* 进入红外遥控 */
+    /* 鼠标模式：左右键（按下=按住，抬起=松开，可拖拽） */
+    UI_BTN_MOUSE_LEFT,       /* 左键 */
+    UI_BTN_MOUSE_RIGHT,      /* 右键 */
+    /* 红外模式 */
+    UI_BTN_IR_LEARN,         /* 学习当前槽 */
+    UI_BTN_IR_SEND,          /* 发射当前槽 */
+    UI_BTN_IR_SLOT,          /* 切换槽位 */
+    UI_BTN_IR_BACK,          /* 返回遥控模式 */
     /* 校准模式 */
     UI_BTN_CAL_NEXT,         /* 校准：下一集 */
     UI_BTN_CAL_PREV,         /* 校准：上一集 */

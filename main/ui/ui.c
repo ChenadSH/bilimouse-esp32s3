@@ -67,31 +67,58 @@ static const btn_def_t s_main_btns[] = {
 #define MAIN_BTN_CNT  (sizeof(s_main_btns) / sizeof(s_main_btns[0]))
 
 static const btn_def_t s_sub_btns[] = {
-    { UI_BTN_VOLUME_DOWN,   4,  SUB_BTN_Y, 60, SUB_BTN_H, "音量-", COL_SUBTEXT },
-    { UI_BTN_VOLUME_UP,    68,  SUB_BTN_Y, 60, SUB_BTN_H, "音量+", COL_SUBTEXT },
-    { UI_BTN_FULLSCREEN,  132,  SUB_BTN_Y, 60, SUB_BTN_H, "全屏",  COL_SUBTEXT },
-    { UI_BTN_MOUSE_MODE,  196,  SUB_BTN_Y, 60, SUB_BTN_H, "鼠标",  COL_SUBTEXT },
-    { UI_BTN_TOUCH_CAL,   260,  SUB_BTN_Y, 56, SUB_BTN_H, "校准",  COL_SUBTEXT },
+    { UI_BTN_VOLUME_DOWN,   3,  SUB_BTN_Y, 49, SUB_BTN_H, "音量-", COL_SUBTEXT },
+    { UI_BTN_VOLUME_UP,    55,  SUB_BTN_Y, 49, SUB_BTN_H, "音量+", COL_SUBTEXT },
+    { UI_BTN_FULLSCREEN,  107,  SUB_BTN_Y, 49, SUB_BTN_H, "全屏",  COL_SUBTEXT },
+    { UI_BTN_MOUSE_MODE,  159,  SUB_BTN_Y, 49, SUB_BTN_H, "鼠标",  COL_SUBTEXT },
+    { UI_BTN_IR_MODE,     211,  SUB_BTN_Y, 49, SUB_BTN_H, "红外",  COL_SUBTEXT },
+    { UI_BTN_TOUCH_CAL,   263,  SUB_BTN_Y, 49, SUB_BTN_H, "校准",  COL_SUBTEXT },
 };
 
 #define SUB_BTN_CNT  (sizeof(s_sub_btns) / sizeof(s_sub_btns[0]))
 
-/* 鼠标模式下的「返回遥控」小按钮：全屏触控板时必须留一个出口，
-   否则切进鼠标模式就再也点不到任何按钮了。 */
-static const btn_def_t s_float_btns[] = {
-    { UI_BTN_MOUSE_MODE, 240, 166, 74, 44, "遥控", COL_ACCENT },
+/*
+ * 鼠标模式：左右两侧各一个竖长按键，中间整块是触控板。
+ *
+ * 按键是「按住型」：手指按下立即发 mouse down，抬起才发 up，
+ * 所以按住后往中间拖就是拖拽/框选，和真实鼠标一致。
+ * 两侧留 58px，手指粗也能按准；中间 196px 宽足够划动指针。
+ */
+#define MOUSE_BTN_W   58
+#define MOUSE_BTN_Y   30
+#define MOUSE_BTN_H   200
+
+static const btn_def_t s_mouse_btns[] = {
+    { UI_BTN_MOUSE_LEFT,   4,                    MOUSE_BTN_Y, MOUSE_BTN_W, MOUSE_BTN_H, "左键", COL_ACCENT },
+    { UI_BTN_MOUSE_RIGHT,  SCR_W - 4 - MOUSE_BTN_W, MOUSE_BTN_Y, MOUSE_BTN_W, MOUSE_BTN_H, "右键", COL_ACCENT },
+    /* 返回遥控的出口：必须留着，否则进了鼠标模式就点不到别的按钮 */
+    { UI_BTN_MOUSE_MODE,   132,                  188,          56,           44,          "遥控", COL_SUBTEXT },
 };
 
-#define FLOAT_BTN_CNT (sizeof(s_float_btns) / sizeof(s_float_btns[0]))
+#define MOUSE_BTN_CNT (sizeof(s_mouse_btns) / sizeof(s_mouse_btns[0]))
 
-/* 校准模式按钮：两个大按钮 + 一个完成 */
+/* 红外模式：学习 / 发射 / 切换槽 / 返回 */
+#define IR_BTN_Y   112
+#define IR_BTN_H   56
+
+static const btn_def_t s_ir_btns[] = {
+    { UI_BTN_IR_LEARN,   6,   IR_BTN_Y, 150, IR_BTN_H, "学习",   COL_ACCENT },
+    { UI_BTN_IR_SEND,  164,   IR_BTN_Y, 150, IR_BTN_H, "发射",   COL_OK },
+    { UI_BTN_IR_SLOT,    6,   IR_BTN_Y + IR_BTN_H + 8, 150, 44, "换下一个槽", COL_SUBTEXT },
+    { UI_BTN_IR_BACK,  164,   IR_BTN_Y + IR_BTN_H + 8, 150, 44, "返回",   COL_SUBTEXT },
+};
+
+#define IR_BTN_CNT (sizeof(s_ir_btns) / sizeof(s_ir_btns[0]))
+
+/* 校准模式按钮：两个大按钮 + 一个完成。
+   完成按钮必须完整落在底栏(218)之上，之前 h=80 时会被 footer 压住一半。 */
 #define CAL_BTN_Y      110
-#define CAL_BTN_H      80
+#define CAL_BTN_H      64
 
 static const btn_def_t s_cal_btns[] = {
     { UI_BTN_CAL_NEXT,   6,  CAL_BTN_Y, 150, CAL_BTN_H, "校准下一集", COL_ACCENT },
     { UI_BTN_CAL_PREV, 164,  CAL_BTN_Y, 150, CAL_BTN_H, "校准上一集", COL_ACCENT },
-    { UI_BTN_CAL_EXIT, 80,  CAL_BTN_Y + CAL_BTN_H + 8, 160, 44, "完成", COL_OK },
+    { UI_BTN_CAL_EXIT, 80,  CAL_BTN_Y + CAL_BTN_H + 8, 160, 32, "完成", COL_OK },
 };
 
 #define CAL_BTN_CNT  (sizeof(s_cal_btns) / sizeof(s_cal_btns[0]))
@@ -261,6 +288,7 @@ static void draw_header(void)
     case UI_MODE_MOUSE:      mode_txt = "鼠标模式";   break;
     case UI_MODE_CALIBRATE:  mode_txt = "校准模式";   break;
     case UI_MODE_TOUCH_CAL:  mode_txt = "触摸校准";   break;
+    case UI_MODE_IR:         mode_txt = "红外遥控";   break;
     case UI_MODE_REMOTE:
     default:                 mode_txt = "遥控模式";   break;
     }
@@ -276,11 +304,9 @@ static void draw_header(void)
     draw_text(SCR_W - 10 - tw, 5, conn_txt, dot_col, 100);
 }
 
-/** 动作卡片：最近一次动作 */
-static void draw_action_card(void)
+/** 动作卡片：最近一次动作（可指定横向范围，鼠标模式要避开左右键） */
+static void draw_action_card_in(int card_x, int card_w)
 {
-    int card_x = 6;
-    int card_w = SCR_W - 12;
     int card_y = HEADER_H + 4;
     int card_h = 58;
 
@@ -289,7 +315,7 @@ static void draw_action_card(void)
 
     /* 主标题（居中） */
     int tw = text_width(s_title);
-    int tx = (SCR_W - tw) / 2;
+    int tx = card_x + (card_w - tw) / 2;
     if (tw > card_w - 16) {
         tx = card_x + 8;
     }
@@ -298,12 +324,17 @@ static void draw_action_card(void)
     /* 副标题（居中，灰色） */
     if (s_subtitle[0]) {
         int sw = text_width(s_subtitle);
-        int sx = (SCR_W - sw) / 2;
+        int sx = card_x + (card_w - sw) / 2;
         if (sw > card_w - 16) {
             sx = card_x + 8;
         }
         draw_text(sx, card_y + 32, s_subtitle, COL_SUBTEXT, card_w - 16);
     }
+}
+
+static void draw_action_card(void)
+{
+    draw_action_card_in(6, SCR_W - 12);
 }
 
 /** 带文字的按钮 */
@@ -384,18 +415,25 @@ static void redraw(void)
     }
     fill_rect(0, 0, SCR_W, SCR_H, COL_BG);
     draw_header();
-    draw_action_card();
 
     if (s_mode == UI_MODE_TOUCH_CAL) {
+        draw_action_card();
         draw_touch_cal();
     } else if (s_mode == UI_MODE_CALIBRATE) {
+        draw_action_card();
         draw_btn_group(s_cal_btns, CAL_BTN_CNT);
     } else if (s_mode == UI_MODE_REMOTE) {
+        draw_action_card();
         draw_btn_group(s_main_btns, MAIN_BTN_CNT);
         draw_btn_group(s_sub_btns, SUB_BTN_CNT);
+    } else if (s_mode == UI_MODE_IR) {
+        draw_action_card();
+        draw_btn_group(s_ir_btns, IR_BTN_CNT);
     } else {
-        /* 鼠标模式：整个屏幕都是触控板，只留一个返回遥控的出口 */
-        draw_btn_group(s_float_btns, FLOAT_BTN_CNT);
+        /* 鼠标模式：左右两个按住型按键，中间是触控板。
+           卡片缩窄到中间，避免被按键压住。 */
+        draw_action_card_in(70, SCR_W - 140);
+        draw_btn_group(s_mouse_btns, MOUSE_BTN_CNT);
     }
 
     draw_footer();
@@ -433,8 +471,11 @@ ui_button_t ui_hit_test(uint16_t x, uint16_t y)
         }
         return hit_group(s_sub_btns, SUB_BTN_CNT, x, y);
     }
-    /* 鼠标模式：屏幕整体是触控板，只保留右下角的「遥控」出口 */
-    return hit_group(s_float_btns, FLOAT_BTN_CNT, x, y);
+    if (s_mode == UI_MODE_IR) {
+        return hit_group(s_ir_btns, IR_BTN_CNT, x, y);
+    }
+    /* 鼠标模式：左右按键优先，其余区域都是触控板 */
+    return hit_group(s_mouse_btns, MOUSE_BTN_CNT, x, y);
 }
 
 /* ==================== 对外接口 ==================== */

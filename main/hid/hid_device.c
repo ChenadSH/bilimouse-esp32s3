@@ -26,8 +26,11 @@
 #include "esp_hidd_prf_api.h"
 #include "hidd_le_prf_int.h"
 
-/* 官方 esp_hidd_prf_api.c 中的局部宏，此处复用以保持报告长度一致 */
-#define HID_MOUSE_IN_RPT_LEN 5
+/* 鼠标输入报告长度：必须等于 Report Map 里 mouse collection 的实际字节数
+ *   buttons(3bit + 5bit padding) + X + Y + Wheel = 4 字节
+ * 写成 5（官方 demo 的 AC Pan 版本）会让 macOS 判定报告长度不符，
+ * 整包丢弃 —— 移动/滚轮/点击全部失效，且串口日志一切正常。 */
+#define HID_MOUSE_IN_RPT_LEN 4
 
 static const char *TAG = "hid_device";
 
@@ -533,7 +536,6 @@ esp_err_t hid_mouse_scroll(int8_t wheel)
     buffer[1] = 0;        /* X */
     buffer[2] = 0;        /* Y */
     buffer[3] = (uint8_t)wheel;  /* Wheel */
-    buffer[4] = 0;        /* AC Pan */
 
     hid_dev_send_report(hidd_le_env.gatt_if, s_conn_id,
                         HID_RPT_ID_MOUSE_IN, HID_REPORT_TYPE_INPUT,
@@ -546,13 +548,22 @@ esp_err_t hid_mouse_click(uint8_t button)
     if (!hid_device_is_ready()) {
         return ESP_ERR_INVALID_STATE;
     }
-    /* 按下。保持时长有讲究：macOS 会折叠靠得太近的 HID 报告，
-       down/up 间隔太短(如 30ms)会被折叠成"什么都没发生"——
-       症状正是移动正常、滚轮正常、点击无效。真鼠标一次点击
-       按下 80~120ms，这里取 80ms，各平台都能稳定注册。 */
-    esp_hidd_send_mouse_value(s_conn_id, button, 0, 0);
-    vTaskDelay(pdMS_TO_TICKS(80));
-    /* 释放 */
+    /*
+     * 一次可靠的单击 = 带位移的按下 + 反向位移抵消 + 延时后释放。
+     *
+     * 三个必须同时满足的条件（缺一个就会"串口有日志、主机没反应"）：
+     *   1. 报告长度必须等于描述符声明的字节数（本工程 4 字节，见上方宏）；
+     *      长度不符时主机会整包丢弃，移动也会一起失效。
+     *   2. 按下状态必须保持足够久。macOS 会折叠间隔过近的 HID 报告，
+     *      down/up 只隔 30ms 时经常被折叠成"什么都没发生"，这里按住约 60ms。
+     *   3. 报告里要带一点位移。部分主机的 HID 事件管线只在有位移时才派发，
+     *      纯按键变化（dx=dy=0）的报告会被当成空报告折叠。这里先 +1px
+     *      再用 -1px 抵消，净位移为 0，光标不会漂移。
+     */
+    esp_hidd_send_mouse_value(s_conn_id, button, 1, 0);
+    vTaskDelay(pdMS_TO_TICKS(12));
+    esp_hidd_send_mouse_value(s_conn_id, button, -1, 0);
+    vTaskDelay(pdMS_TO_TICKS(48));
     esp_hidd_send_mouse_value(s_conn_id, 0, 0, 0);
     return ESP_OK;
 }
@@ -599,11 +610,13 @@ esp_err_t hid_keyboard_combo(uint8_t keycode, uint8_t modifier)
         return ESP_ERR_INVALID_STATE;
     }
     uint8_t keys[1] = { keycode };
-    /* 按下 */
+    /* 按下。保持 60ms 而不是 30ms：主机同样会折叠靠得太近的报告，
+       实体键只按一次却"没反应"多数是这个原因。 */
     esp_hidd_send_keyboard_value(s_conn_id, modifier, keys, 1);
-    vTaskDelay(pdMS_TO_TICKS(30));
+    vTaskDelay(pdMS_TO_TICKS(60));
     /* 释放 */
     esp_hidd_send_keyboard_value(s_conn_id, 0, NULL, 0);
+    vTaskDelay(pdMS_TO_TICKS(20));
     return ESP_OK;
 }
 
