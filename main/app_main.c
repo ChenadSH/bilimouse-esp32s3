@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -333,6 +334,8 @@ static void input_task(void *arg)
 
     bool last = (bsp_button_get_state() == BSP_BUTTON_PRESSED);
     bool ready_warned = false;
+    uint32_t press_ms = 0;
+    bool reset_warned = false;
 
     /* 上电时 GPIO0 常被外部拉低（进入下载模式的那颗 strapping 脚），
        先等它稳定松开，避免一开机就给主机发一次空格。 */
@@ -341,21 +344,42 @@ static void input_task(void *arg)
 
     while (1) {
         bool now = (bsp_button_get_state() == BSP_BUTTON_PRESSED);
+        uint32_t tick = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 
         if (now != last) {
             last = now;
+            if (now) {
+                press_ms = tick;
+                reset_warned = false;
 
-            if (!hid_device_is_ready()) {
-                if (!ready_warned) {
-                    ready_warned = true;
-                    ui_show_hint("蓝牙未就绪，按键暂不可用");
+                if (!hid_device_is_ready()) {
+                    if (!ready_warned) {
+                        ready_warned = true;
+                        ui_show_hint("蓝牙未就绪，按键暂不可用");
+                    }
+                } else {
+                    ready_warned = false;
+                    power_mgr_notify_activity();
+                    esp_err_t e = hid_keyboard_tap(HID_KEY_SPACEBAR, HID_MOD_NONE);
+                    ESP_LOGI(TAG, "button: space tap (%s)", esp_err_to_name(e));
+                    ui_show_hint(e == ESP_OK ? "空格：播放/暂停" : "发送失败");
                 }
-            } else if (now) {
-                ready_warned = false;
-                power_mgr_notify_activity();
-                esp_err_t e = hid_keyboard_tap(HID_KEY_SPACEBAR, HID_MOD_NONE);
-                ESP_LOGI(TAG, "button: space tap (%s)", esp_err_to_name(e));
-                ui_show_hint(e == ESP_OK ? "空格：播放/暂停" : "发送失败");
+            }
+        } else if (now) {
+            /* 长按 2s 提示、5s 执行：清空本机所有配对密钥后重启，
+               重新以全新身份广播。主机端怎么删记录都追得上 —— 这是
+               "搜索不到设备" 时的最后一招自救，不需要接电脑。 */
+            uint32_t held = tick - press_ms;
+            if (!reset_warned && held >= 2000) {
+                reset_warned = true;
+                ui_show_hint("继续按住 = 重置蓝牙配对");
+            }
+            if (held >= 5000) {
+                ESP_LOGW(TAG, "long press: clearing bonds and restarting");
+                ui_show_hint("清除配对，正在重启");
+                hid_device_clear_bonds();
+                vTaskDelay(pdMS_TO_TICKS(300));
+                esp_restart();
             }
         }
         vTaskDelay(pdMS_TO_TICKS(5));
