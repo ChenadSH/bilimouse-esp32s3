@@ -1,6 +1,6 @@
 # BiliMouse OTA 在线升级与红外码备份指南
 
-> 版本 v2.3 · 2026-11-05
+> 版本 v2.3 · 2026-11-05  
 > 适用固件：`PROJECT_VER ≥ 2.3.0`（分区表含 `ota_0 / ota_1 / otadata`）
 
 本文覆盖三件事：
@@ -13,7 +13,7 @@
 
 ## 0. 一次性准备：刷入 OTA 版分区表
 
-v2.3 之前的固件用的是单 app 分区表，**必须先按下面步骤刷一次**，
+v2.3 之前的固件用的是单 app 分区表，**必须先按下面步骤刷一次**，  
 之后才能使用 OTA：
 
 ```bash
@@ -21,20 +21,20 @@ tools\build.bat D:\pro\bilimouse-esp32s3 build
 idf.py -p COM口 flash
 ```
 
-`idf.py flash` 会自动写入新分区表 + bootloader + otadata（空）+ app 到 `ota_0`。
-**NVS（0x9000）不被触碰**，校准、蓝牙配对、WiFi 配置全部保留；
-`irbank` 分区偏移有变化，分区镜像会丢一次，但固件启动时会自动从 NVS
+`idf.py flash` 会自动写入新分区表 + bootloader + otadata（空）+ app 到 `ota_0`。  
+**NVS（0x9000）不被触碰**，校准、蓝牙配对、WiFi 配置全部保留；  
+`irbank` 分区偏移有变化，分区镜像会丢一次，但固件启动时会自动从 NVS  
 副本重建（这就是双副本设计的用途），**已学的红外码不会丢**。
 
 新分区表（16MB Flash）：
 
-| 分区 | 偏移 | 大小 | 用途 |
-|---|---|---|---|
-| nvs | 0x9000 | 24K | 配置/校准/配对密钥/**红外码主副本**（偏移永不变） |
-| otadata | 0x10000 | 8K | OTA 启动选择器 |
-| ota_0 | 0x20000 | 2M | app 槽 A |
-| ota_1 | 0x220000 | 2M | app 槽 B（OTA 时写这个） |
-| irbank | 0x420000 | 64K | 红外码镜像（A/B 双扇区） |
+| 分区      | 偏移       | 大小  | 用途                           |
+| ------- | -------- | --- | ---------------------------- |
+| nvs     | 0x9000   | 24K | 配置/校准/配对密钥/**红外码主副本**（偏移永不变） |
+| otadata | 0x10000  | 8K  | OTA 启动选择器                    |
+| ota_0   | 0x20000  | 2M  | app 槽 A                      |
+| ota_1   | 0x220000 | 2M  | app 槽 B（OTA 时写这个）            |
+| irbank  | 0x420000 | 64K | 红外码镜像（A/B 双扇区）               |
 
 当前固件 1.49MB，单槽 2MB，剩余约 540KB 增长空间。
 
@@ -51,18 +51,18 @@ idf.py -p COM口 monitor
 # 看到 "bilimouse> " 提示符后直接敲命令
 ```
 
-> monitor 里输入命令时日志可能插在中间，不影响命令解析；
+> monitor 里输入命令时日志可能插在中间，不影响命令解析；  
 > 按 `Ctrl+]` 退出 monitor。
 
 ### 1.2 命令一览
 
-| 命令 | 作用 |
-|---|---|
-| `ir_list` | 列出 10 个槽的状态和码库序号 |
-| `ir_export all` | 全部导出（每槽一行） |
-| `ir_export 3` | 只导出 3 号槽 |
-| `ir_import 3 <b64>` | 把一行 base64 导入 3 号槽 |
-| `ir_clear confirm` | 清空全部（危险，需带 confirm） |
+| 命令                  | 作用                  |
+| ------------------- | ------------------- |
+| `ir_list`           | 列出 10 个槽的状态和码库序号    |
+| `ir_export all`     | 全部导出（每槽一行）          |
+| `ir_export 3`       | 只导出 3 号槽            |
+| `ir_import 3 <b64>` | 把一行 base64 导入 3 号槽  |
+| `ir_clear confirm`  | 清空全部（危险，需带 confirm） |
 
 ### 1.3 备份流程
 
@@ -75,8 +75,8 @@ BMIR1 slot=1 state=empty
 ...
 ```
 
-把输出整体复制存成 `ir_backup.txt` 即完成备份。
-**每一行都是自包含的**——以后任何时候（甚至换一块板子），
+把输出整体复制存成 `ir_backup.txt` 即完成备份。  
+**每一行都是自包含的**——以后任何时候（甚至换一块板子），  
 把需要的行粘贴回去执行 `ir_import <slot> <那行b64>` 就能恢复。
 
 ### 1.4 格式说明（供程序化处理）
@@ -89,7 +89,7 @@ BMIR1 slot=1 state=empty
         duration0:16 | level0:1.. | duration1:16 | level1:1..，小端）
 ```
 
-每个 symbol 的 duration0/duration1 是电平持续时间（微秒），
+每个 symbol 的 duration0/duration1 是电平持续时间（微秒），  
 level0/level1 是电平。用 Python 重建 NEC 波形或转成 JSON 都很简单：
 
 ```python
@@ -109,7 +109,7 @@ for w in words:
 
 ## 2. OTA 服务器部署
 
-设备只会发两个 HTTP GET：`manifest.json`（版本清单）和清单里的
+设备只会发两个 HTTP GET：`manifest.json`（版本清单）和清单里的  
 固件 bin。**任何能提供静态文件的服务都行**。
 
 ### 2.1 最快方式：Python 静态服务器（局域网）
@@ -132,7 +132,7 @@ publish/
 }
 ```
 
-> `url` 必须是设备能访问到的地址：用电脑的**局域网 IP**，
+> `url` 必须是设备能访问到的地址：用电脑的**局域网 IP**，  
 > 不是 localhost。版本号必须是 `数字.数字.数字` 三段式。
 
 启动服务（在 publish 目录下）：
@@ -143,21 +143,18 @@ python -m http.server 8070
 
 ### 2.2 用 GitHub 仓库做 OTA 服务器（推荐，公网可用）
 
-设备固件已内置主流 CA 根证书包（`esp_crt_bundle_attach`），可以直接走
+设备固件已内置主流 CA 根证书包（`esp_crt_bundle_attach`），可以直接走  
 GitHub 的 HTTPS，不需要任何后端代码。**一个纯静态仓库就够**。
 
 #### 方式 A：独立发布仓库（推荐）
 
 1. 新建一个公开仓库，例如 `yourname/bilimouse-ota`，放入两个文件：
-
    ```
    bilimouse-ota/
    ├── manifest.json
    └── bilimouse-2.4.0.bin      # 把 build/bilimouse.bin 改名放进来
    ```
-
 2. `manifest.json`（`url` 必须写完整的 raw 链接）：
-
    ```json
    {
      "version": "2.4.0",
@@ -165,22 +162,18 @@ GitHub 的 HTTPS，不需要任何后端代码。**一个纯静态仓库就够**
      "notes": "修复点击/拖拽"
    }
    ```
-
 3. 设备端填一次地址（存 NVS，之后不用再动）：
-
    ```
    bilimouse> ota url https://raw.githubusercontent.com/yourname/bilimouse-ota/main/manifest.json
    ```
-
-4. **发布新版本**：把新的 `.bin` 传上去（GitHub 网页 Add file → Upload files，
-   或 git push），然后**只改 `manifest.json` 里的 `version` 和 `url` 两个字符串**，
+4. **发布新版本**：把新的 `.bin` 传上去（GitHub 网页 Add file → Upload files，  
+   或 git push），然后**只改 `manifest.json` 里的 `version` 和 `url` 两个字符串**，  
    提交即可。设备下次点「升级」就会拿到新版本。
 
 #### 方式 B：GitHub Releases（不用每次改仓库文件）
 
-1. 在固件仓库打 release：`Releases → Draft a new release`，tag 填
+1. 在固件仓库打 release：`Releases → Draft a new release`，tag 填  
    `v2.4.0`，把 `bilimouse.bin` 和一份 `manifest.json` 作为附件上传：
-
    ```json
    {
      "version": "2.4.0",
@@ -188,29 +181,28 @@ GitHub 的 HTTPS，不需要任何后端代码。**一个纯静态仓库就够**
      "notes": "..."
    }
    ```
-
-2. `releases/latest/download/<文件名>` 是 GitHub 提供的**永久重定向链接**，
-   永远指向最新 release 的同名附件。把这个链接（manifest 或 bin 均可）
-   填给设备即可，以后发新版本只需要传新 release，什么都不用改。
+2. `releases/latest/download/<文件名>` 是 GitHub 提供的**永久重定向链接**，  
+   永远指向最新 release 的同名附件。把这个链接（manifest 或 bin 均可）  
+   填给设备即可，以后发新版本只需要传新 release，什么都不用改。  
    设备端 `esp_http_client` 默认跟随 302 重定向。
 
 #### 方式 C：GitHub Pages（链接最短）
 
-仓库 `Settings → Pages → Deploy from branch` 选 `main` / `root`，
-文件通过 `https://yourname.github.io/bilimouse-ota/manifest.json` 访问。
+仓库 `Settings → Pages → Deploy from branch` 选 `main` / `root`，  
+文件通过 `https://yourname.github.io/bilimouse-ota/manifest.json` 访问。  
 .bin 同样放仓库根目录，manifest 的 `url` 写 Pages 域名下的地址。
 
 #### 三种方式怎么选
 
-| 方式 | 每次发版的动作 | 适用 |
-|---|---|---|
-| A 独立仓库 | 传 .bin + 改 manifest 两行 | **最直观，推荐** |
-| B Releases | 只传新 release | 版本多、嫌改 manifest 烦 |
-| C Pages | git push | 想要好看的固定域名 |
+| 方式         | 每次发版的动作                | 适用                |
+| ---------- | ---------------------- | ----------------- |
+| A 独立仓库     | 传 .bin + 改 manifest 两行 | **最直观，推荐**        |
+| B Releases | 只传新 release            | 版本多、嫌改 manifest 烦 |
+| C Pages    | git push               | 想要好看的固定域名         |
 
-> 注意：仓库必须**公开**（私有仓库的 raw 链接需要 token）。WiFi 凭据
-> （WPP-Guest）已写入固件默认值，NVS 里的设置优先；manifest 地址同样
-> 已有编译期默认（`Kconfig.projbuild` 里的 `BILIMOUSE_OTA_URL`），改成
+> 注意：仓库必须**公开**（私有仓库的 raw 链接需要 token）。WiFi 凭据  
+> （WPP-Guest）已写入固件默认值，NVS 里的设置优先；manifest 地址同样  
+> 已有编译期默认（`Kconfig.projbuild` 里的 `BILIMOUSE_OTA_URL`），改成  
 > 你的仓库地址后烧录即生效，不用再敲串口命令。
 
 ### 2.3 设备端配置（一次性）
@@ -226,8 +218,8 @@ bilimouse> ota url http://192.168.1.100:8070/manifest.json
 ok: manifest url saved
 ```
 
-WiFi 凭据和 manifest 地址都存 NVS，掉电不丢；
-Kconfig 里的 `BILIMOUSE_WIFI_SSID/PASS/OTA_URL` 只是出厂默认值，
+WiFi 凭据和 manifest 地址都存 NVS，掉电不丢；  
+Kconfig 里的 `BILIMOUSE_WIFI_SSID/PASS/OTA_URL` 只是出厂默认值，  
 被 NVS 覆盖。
 
 ### 2.4 触发升级
@@ -237,12 +229,12 @@ Kconfig 里的 `BILIMOUSE_WIFI_SSID/PASS/OTA_URL` 只是出厂默认值，
 
 ### 2.5 自建服务器（可选）
 
-| 场景 | 建议 |
-|---|---|
-| 家里常开 | 路由器/树莓派上跑 nginx 或 caddy 指向 publish 目录 |
-| 公网分发 | GitHub Releases + 固定跳转 URL，或对象存储 + CDN |
-| 安全要求高 | 换 HTTPS：Kconfig/cert 配置服务器证书，
-  `ESP_HTTPS_OTA_ALLOW_HTTP` 改回 n（当前为方便局域网调试已打开） |
+| 场景                                             | 建议                                     |
+| ---------------------------------------------- | -------------------------------------- |
+| 家里常开                                           | 路由器/树莓派上跑 nginx 或 caddy 指向 publish 目录  |
+| 公网分发                                           | GitHub Releases + 固定跳转 URL，或对象存储 + CDN |
+| 安全要求高                                          | 换 HTTPS：Kconfig/cert 配置服务器证书，          |
+| `ESP_HTTPS_OTA_ALLOW_HTTP` 改回 n（当前为方便局域网调试已打开） |                                        |
 
 ---
 
@@ -250,10 +242,10 @@ Kconfig 里的 `BILIMOUSE_WIFI_SSID/PASS/OTA_URL` 只是出厂默认值，
 
 ### 3.1 触发
 
-| 方式 | 入口 | 行为 |
-|---|---|---|
-| **手动（默认唯一方式）** | 屏幕「升级」按钮 / 串口 `ota check` | 每一步都有屏幕提示，失败给出原因 |
-| 自动（可选编译项） | 开机 30s 后（`BILIMOUSE_OTA_AUTO_CHECK=y`） | 有新版→直接升级→自动重启；失败**静默**。**默认关闭**，用户要求只保留手动按钮 |
+| 方式             | 入口                                     | 行为                                          |
+| -------------- | -------------------------------------- | ------------------------------------------- |
+| **手动（默认唯一方式）** | 屏幕「升级」按钮 / 串口 `ota check`              | 每一步都有屏幕提示，失败给出原因                            |
+| 自动（可选编译项）      | 开机 30s 后（`BILIMOUSE_OTA_AUTO_CHECK=y`） | 有新版→直接升级→自动重启；失败**静默**。**默认关闭**，用户要求只保留手动按钮 |
 
 ### 3.2 完整流程
 
@@ -283,43 +275,45 @@ ota_run()
 
 ### 3.3 三道安全网
 
-1. **镜像校验**：esp_https_ota_finish 拒绝损坏/不完整的镜像，
+1. **镜像校验**：esp_https_ota_finish 拒绝损坏/不完整的镜像，  
    失败时**不切换启动分区**；
-2. **回滚**：`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`。新固件未经
-   确认就崩溃 → bootloader 自动退回旧槽。所以升级变砖的最坏结果
+2. **回滚**：`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`。新固件未经  
+   确认就崩溃 → bootloader 自动退回旧槽。所以升级变砖的最坏结果  
    是"回滚到旧版本"；
-3. **数据隔离**：OTA 只写 app 槽，NVS（校准/配置/红外码主副本）和
+3. **数据隔离**：OTA 只写 app 槽，NVS（校准/配置/红外码主副本）和  
    irbank 分区全程不被触碰。
 
 ### 3.4 发布新版本的操作步骤
 
-1. 改两处版本号：`CMakeLists.txt` 的 `PROJECT_VER`、
+1. 改两处版本号：`CMakeLists.txt` 的 `PROJECT_VER`、  
    `docs/PRD.md` 版本行；
 2. 编译：`tools\build.bat D:\pro\bilimouse-esp32s3 build`；
 3. 把 `build\bilimouse.bin` 复制进 publish 目录并按版本改名；
 4. 更新 `manifest.json` 的 `version` 和 `url`；
-5. 完成。在线设备最迟下一次开机 30 秒后自动升级；
+5. 完成。在线设备最迟下一次开机 30 秒后自动升级；  
    急用就让设备点一下「升级」。
 
 ### 3.5 常见问题
 
-| 现象 | 原因/处理 |
-|---|---|
-| 屏幕显示"未配置 WiFi" | 串口执行 `wifi set <ssid> <pass>` |
-| "无法获取清单" | 电脑防火墙拦 8070 / URL 写了 localhost / manifest 不是合法 JSON |
-| 检查到新版本但下载失败 | url 404（bin 没上传或名字不一致） |
-| 升级完成后又退回旧版 | 新固件启动失败被回滚——连串口看 panic 日志 |
-| 版本明明更新但不升级 | manifest.version 不是三段数字（如 "v2.3.1" 带了 v 前缀） |
+| 现象             | 原因/处理                                               |
+| -------------- | --------------------------------------------------- |
+| 屏幕显示"未配置 WiFi" | 串口执行 `wifi set <ssid> <pass>`                       |
+| "无法获取清单"       | 电脑防火墙拦 8070 / URL 写了 localhost / manifest 不是合法 JSON |
+| 检查到新版本但下载失败    | url 404（bin 没上传或名字不一致）                              |
+| 升级完成后又退回旧版     | 新固件启动失败被回滚——连串口看 panic 日志                           |
+| 版本明明更新但不升级     | manifest.version 不是三段数字（如 "v2.3.1" 带了 v 前缀）         |
+
+
 
 ---
 
 ## 4. 相关文件
 
-| 文件 | 职责 |
-|---|---|
-| `main/app/ota_update.c` | WiFi 管理、manifest 解析、semver 比较、esp_https_ota 流程 |
-| `main/app/cli.c` | 串口 REPL 启动（ir/wifi/ota 命令入口） |
-| `main/app/ir_backup.c` | 红外码导出/导入命令 |
-| `main/app/ir_remote.c` | `ir_remote_read_slot / write_slot` 读写槽接口 |
-| `partitions.csv` | ota_0/ota_1/otadata/irbank 分区定义 |
-| `main/Kconfig.projbuild` | WiFi/OTA 默认配置项 |
+| 文件                       | 职责                                             |
+| ------------------------ | ---------------------------------------------- |
+| `main/app/ota_update.c`  | WiFi 管理、manifest 解析、semver 比较、esp_https_ota 流程 |
+| `main/app/cli.c`         | 串口 REPL 启动（ir/wifi/ota 命令入口）                   |
+| `main/app/ir_backup.c`   | 红外码导出/导入命令                                     |
+| `main/app/ir_remote.c`   | `ir_remote_read_slot / write_slot` 读写槽接口       |
+| `partitions.csv`         | ota_0/ota_1/otadata/irbank 分区定义                |
+| `main/Kconfig.projbuild` | WiFi/OTA 默认配置项                                 |
