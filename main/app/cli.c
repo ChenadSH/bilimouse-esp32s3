@@ -71,15 +71,17 @@ esp_err_t cli_start(void)
         .rx_gpio_num = -1,   /* -1 = 用 CONFIG 默认引脚 */
         .tx_gpio_num = -1,
     };
-    esp_console_repl_config_t repl_cfg = {
-        /* linenoise 拒绝 len<1：max_history_len=0 会让 REPL 创建中途失败，
-           而 IDF 的清理路径只删 UART 驱动不切回 VFS nonblocking 模式，
-           之后所有日志写入都报错并递归打日志 -> 栈爆 -> 重启循环。
-           所以这里用 1（等效"无历史"），绝不能用 0。 */
-        .max_history_len = 1,
-        .prompt = "bilimouse> ",
-        .max_cmdline_length = 1024,    /* 单槽导出行 ~516 字符 */
-    };
+    /* 必须从 DEFAULT 起手再覆盖：直接写指定初始化会把没写的字段（尤其
+       task_stack_size / task_priority）置 0，xTaskCreate 用 0 栈必然失败，
+       esp_console_new_repl_uart 就返回 ESP_FAIL —— REPL 永远起不来。 */
+    esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
+    /* linenoise 拒绝 len<1：max_history_len=0 会让 REPL 创建中途失败，
+       而 IDF 的清理路径只删 UART 驱动不切回 VFS nonblocking 模式，
+       之后所有日志写入都报错并递归打日志 -> 栈爆 -> 重启循环。
+       所以这里用 1（等效"无历史"），绝不能用 0。 */
+    repl_cfg.max_history_len = 1;
+    repl_cfg.prompt = "bilimouse> ";
+    repl_cfg.max_cmdline_length = 1024;    /* 单槽导出行 ~516 字符 */
 
     err = esp_console_new_repl_uart(&uart_cfg, &repl_cfg, &s_repl);
     if (err != ESP_OK) {

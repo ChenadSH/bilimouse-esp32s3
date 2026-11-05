@@ -868,15 +868,18 @@ void app_main(void)
     /* 串口命令行：红外码备份 + WiFi/OTA 配置（idf.py monitor 里敲 ir/wifi/ota） */
     cli_start();
 
+    /* WiFi + OTA（失败不影响其它功能，只是「升级」按钮不可用）。
+       必须在 nav_alert_init 之前：esp_netif_init 在这里完成 lwip 初始化，
+       否则 httpd_start 里的 socket() 会触发 tcpip_send_msg_wait_sem
+       "Invalid mbox" 断言 -> 开机重启循环。 */
+    if (ota_update_init() != ESP_OK) {
+        ESP_LOGW(TAG, "ota init failed (在线升级不可用)");
+    }
+
     /* 导航提醒 HTTP 服务器（:8080）。失败只是「导航提醒」页收不到推送，
        其余功能不受影响。 */
     if (nav_alert_init() != ESP_OK) {
         ESP_LOGW(TAG, "nav server init failed (导航提醒不可用)");
-    }
-
-    /* WiFi + OTA（失败不影响其它功能，只是「升级」按钮不可用） */
-    if (ota_update_init() != ESP_OK) {
-        ESP_LOGW(TAG, "ota init failed (在线升级不可用)");
     }
 
     /* 走到这里 = 外设、蓝牙、UI 全部就绪：如果本次启动是 OTA 升级后的

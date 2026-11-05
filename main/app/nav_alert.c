@@ -190,6 +190,14 @@ esp_err_t nav_alert_init(void)
     if (s_server) {
         return ESP_OK;
     }
+    /* 兜底：httpd_start 内部要 socket()，lwip 的 tcpip 线程没起就会在
+       tcpip_send_msg_wait_sem 里断言 "Invalid mbox" 直接重启。
+       esp_netif_init 可重复调用（已初始化返回 ESP_OK）。 */
+    esp_err_t nerr = esp_netif_init();
+    if (nerr != ESP_OK && nerr != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "netif init failed: %s (导航提醒不可用)", esp_err_to_name(nerr));
+        return nerr;
+    }
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 8080;
     cfg.lru_purge_enable = true;   /* 内存紧张时踢掉空闲连接 */
