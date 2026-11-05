@@ -54,12 +54,12 @@ typedef struct {
 /* 遥控模式按钮：主按钮行（三个大按钮，横向均分 320px） */
 #define MAIN_BTN_Y      96
 #define MAIN_BTN_H      64
-/* 次按钮行：7 个小按钮（音量- 音量+ 全屏 鼠标 红外 校准 升级）。
-   44px 宽 + 1px 间距，x = 3, 48, 93, 138, 183, 228, 273（末尾到 317）。
+/* 次按钮行：8 个小按钮（音- 音+ 全屏 鼠标 电台 红外 校准 升级）。
+   38px 宽 + 1px 间距，x = 3, 42, 81, 120, 159, 198, 237, 276（末尾到 314）。
    坐标写字面量：preview_ui.py 按数字解析按钮表，带参宏解析不了。 */
 #define SUB_BTN_Y       160
 #define SUB_BTN_H       54
-#define SUB_BTN_W       44
+#define SUB_BTN_W       38
 
 static const btn_def_t s_main_btns[] = {
     { UI_BTN_PREV_EPISODE,   6,  MAIN_BTN_Y, 100, MAIN_BTN_H, "上一集", COL_ACCENT },
@@ -70,13 +70,14 @@ static const btn_def_t s_main_btns[] = {
 #define MAIN_BTN_CNT  (sizeof(s_main_btns) / sizeof(s_main_btns[0]))
 
 static const btn_def_t s_sub_btns[] = {
-    { UI_BTN_VOLUME_DOWN,     3, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "音量-", COL_SUBTEXT },
-    { UI_BTN_VOLUME_UP,      48, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "音量+", COL_SUBTEXT },
-    { UI_BTN_FULLSCREEN,     93, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "全屏",  COL_SUBTEXT },
-    { UI_BTN_MOUSE_MODE,    138, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "鼠标",  COL_SUBTEXT },
-    { UI_BTN_IR_MODE,       183, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "红外",  COL_SUBTEXT },
-    { UI_BTN_TOUCH_CAL,     228, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "校准",  COL_SUBTEXT },
-    { UI_BTN_OTA,           273, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "升级",  COL_SUBTEXT },
+    { UI_BTN_VOLUME_DOWN,     3, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "音-",   COL_SUBTEXT },
+    { UI_BTN_VOLUME_UP,      42, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "音+",   COL_SUBTEXT },
+    { UI_BTN_FULLSCREEN,     81, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "全屏",  COL_SUBTEXT },
+    { UI_BTN_MOUSE_MODE,    120, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "鼠标",  COL_SUBTEXT },
+    { UI_BTN_RADIO_MODE,    159, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "电台",  COL_ACCENT },
+    { UI_BTN_IR_MODE,       198, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "红外",  COL_SUBTEXT },
+    { UI_BTN_TOUCH_CAL,     237, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "校准",  COL_SUBTEXT },
+    { UI_BTN_OTA,           276, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "升级",  COL_SUBTEXT },
 };
 
 #define SUB_BTN_CNT  (sizeof(s_sub_btns) / sizeof(s_sub_btns[0]))
@@ -114,6 +115,19 @@ static const btn_def_t s_ir_btns[] = {
 };
 
 #define IR_BTN_CNT (sizeof(s_ir_btns) / sizeof(s_ir_btns[0]))
+
+/* 电台模式：选台两个大按钮 + 播放/停止 + 返回。
+   台名和状态显示在上方动作卡片（radio.c 通过 ui_show_action 更新）。 */
+#define RADIO_BTN_Y  96
+
+static const btn_def_t s_radio_btns[] = {
+    { UI_BTN_RADIO_PREV,     6,  RADIO_BTN_Y,      150, 56, "上一台",    COL_SUBTEXT },
+    { UI_BTN_RADIO_NEXT,   164,  RADIO_BTN_Y,      150, 56, "下一台",    COL_SUBTEXT },
+    { UI_BTN_RADIO_TOGGLE,   6,  RADIO_BTN_Y + 64, 150, 44, "播放/停止", COL_ACCENT },
+    { UI_BTN_RADIO_BACK,   164,  RADIO_BTN_Y + 64, 150, 44, "返回",      COL_SUBTEXT },
+};
+
+#define RADIO_BTN_CNT (sizeof(s_radio_btns) / sizeof(s_radio_btns[0]))
 
 /* 校准模式按钮：两个大按钮 + 一个完成。
    完成按钮必须完整落在底栏(218)之上，之前 h=80 时会被 footer 压住一半。 */
@@ -294,6 +308,7 @@ static void draw_header(void)
     case UI_MODE_CALIBRATE:  mode_txt = "校准模式";   break;
     case UI_MODE_TOUCH_CAL:  mode_txt = "触摸校准";   break;
     case UI_MODE_IR:         mode_txt = "红外遥控";   break;
+    case UI_MODE_RADIO:      mode_txt = "网络电台";   break;
     case UI_MODE_REMOTE:
     default:                 mode_txt = "遥控模式";   break;
     }
@@ -436,6 +451,9 @@ static void redraw(void)
     } else if (s_mode == UI_MODE_IR) {
         draw_action_card();
         draw_btn_group(s_ir_btns, IR_BTN_CNT);
+    } else if (s_mode == UI_MODE_RADIO) {
+        draw_action_card();
+        draw_btn_group(s_radio_btns, RADIO_BTN_CNT);
     } else {
         /* 鼠标模式：左右两个按住型按键，中间是触控板。
            卡片缩窄到中间，避免被按键压住。 */
@@ -480,6 +498,9 @@ ui_button_t ui_hit_test(uint16_t x, uint16_t y)
     }
     if (s_mode == UI_MODE_IR) {
         return hit_group(s_ir_btns, IR_BTN_CNT, x, y);
+    }
+    if (s_mode == UI_MODE_RADIO) {
+        return hit_group(s_radio_btns, RADIO_BTN_CNT, x, y);
     }
     /* 鼠标模式：左右按键优先，其余区域都是触控板 */
     return hit_group(s_mouse_btns, MOUSE_BTN_CNT, x, y);

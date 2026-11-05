@@ -37,6 +37,9 @@ esp_err_t ota_update_init(void);
 /** 是否已拿到 IP */
 bool ota_update_wifi_connected(void);
 
+/** 阻塞确保 WiFi 在线（未连则按凭据序列尝试）。电台等模块共用。 */
+esp_err_t ota_update_wifi_online(void);
+
 /**
  * 手动升级入口（屏幕「升级」按钮）：独立任务里执行
  * 连 WiFi -> 查 manifest -> 有新版就下载安装 -> 倒计时重启。

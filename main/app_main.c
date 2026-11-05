@@ -41,6 +41,7 @@
 #include "ota_update.h"
 #include "pointer.h"
 #include "power_mgr.h"
+#include "radio.h"
 #include "settings.h"
 #include "touch_cal.h"
 #include "ui.h"
@@ -177,6 +178,27 @@ static void on_ui_button(ui_button_t btn, void *ctx)
         break;
     case UI_BTN_IR_MODE:
         enter_ir_mode();
+        break;
+
+    /* 电台模式 */
+    case UI_BTN_RADIO_MODE:
+        ui_set_mode(UI_MODE_RADIO);
+        radio_enter();
+        break;
+    case UI_BTN_RADIO_PREV:
+        radio_prev();
+        break;
+    case UI_BTN_RADIO_NEXT:
+        radio_next();
+        break;
+    case UI_BTN_RADIO_TOGGLE:
+        radio_toggle();
+        break;
+    case UI_BTN_RADIO_BACK:
+        radio_stop();
+        ui_set_mode(UI_MODE_REMOTE);
+        ui_show_action("遥控模式", "点屏幕按钮操作");
+        ui_set_footer("实体键=空格  轻点=左键");
         break;
 
     /* 红外模式 */

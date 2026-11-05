@@ -92,29 +92,70 @@ static esp_err_t wifi_init_once(void)
     return ESP_OK;
 }
 
-/** 读凭据：NVS 覆盖 Kconfig */
-static bool creds_load(char *ssid, size_t ssid_len,
-                       char *pass, size_t pass_len)
+static esp_err_t wifi_init_once(void);
+static esp_err_t wifi_ensure_connected(void);
+
+typedef struct {
+    char ssid[33];
+    char pass[65];
+} wifi_cred_t;
+
+/** 候选凭据：NVS（串口设置）> 出厂默认1 > 出厂默认2（备用）。
+ *  返回数量，nvs_used 标记第一个是否来自 NVS。 */
+static int creds_collect(wifi_cred_t *list, int max, bool *nvs_used)
 {
+    int n = 0;
     nvs_handle_t h;
-    bool got = false;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
-        size_t l1 = ssid_len, l2 = pass_len;
-        got = (nvs_get_str(h, NVS_KEY_SSID, ssid, &l1) == ESP_OK &&
-               nvs_get_str(h, NVS_KEY_PASS, pass, &l2) == ESP_OK);
+        size_t l1 = sizeof(list[0].ssid), l2 = sizeof(list[0].pass);
+        if (nvs_get_str(h, NVS_KEY_SSID, list[0].ssid, &l1) == ESP_OK &&
+            nvs_get_str(h, NVS_KEY_PASS, list[0].pass, &l2) == ESP_OK &&
+            list[0].ssid[0] != '\0') {
+            n = 1;
+        }
         nvs_close(h);
     }
-    if (!got) {
-        strlcpy(ssid, CONFIG_BILIMOUSE_WIFI_SSID, ssid_len);
-        strlcpy(pass, CONFIG_BILIMOUSE_WIFI_PASS, pass_len);
-        got = ssid[0] != '\0';
+    *nvs_used = n > 0;
+    if (n < max) {
+        strlcpy(list[n].ssid, CONFIG_BILIMOUSE_WIFI_SSID, sizeof(list[n].ssid));
+        strlcpy(list[n].pass, CONFIG_BILIMOUSE_WIFI_PASS, sizeof(list[n].pass));
+        if (list[n].ssid[0] != '\0') {
+            n++;
+        }
     }
-    return got;
+    if (n < max) {
+        strlcpy(list[n].ssid, CONFIG_BILIMOUSE_WIFI_SSID2, sizeof(list[n].ssid));
+        strlcpy(list[n].pass, CONFIG_BILIMOUSE_WIFI_PASS2, sizeof(list[n].pass));
+        if (list[n].ssid[0] != '\0') {
+            n++;
+        }
+    }
+    return n;
+}
+
+/** 对单个凭据尝试连接。成功返回 true 并保持连接。 */
+static bool wifi_try_cred(const wifi_cred_t *c)
+{
+    wifi_config_t wc = {0};
+    strlcpy((char *)wc.sta.ssid, c->ssid, sizeof(wc.sta.ssid));
+    strlcpy((char *)wc.sta.password, c->pass, sizeof(wc.sta.password));
+    esp_wifi_set_config(WIFI_IF_STA, &wc);
+    esp_wifi_connect();
+
+    for (int waited = 0; waited < WIFI_TIMEOUT_MS && !s_wifi_got_ip; waited += 200) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    return s_wifi_got_ip;
 }
 
 bool ota_update_wifi_connected(void)
 {
     return s_wifi_got_ip;
+}
+
+esp_err_t ota_update_wifi_online(void)
+{
+    return wifi_ensure_connected();
 }
 
 static esp_err_t wifi_ensure_connected(void)
@@ -127,21 +168,25 @@ static esp_err_t wifi_ensure_connected(void)
         return ESP_OK;
     }
 
-    char ssid[33] = {0}, pass[65] = {0};
-    if (!creds_load(ssid, sizeof(ssid), pass, sizeof(pass))) {
+    wifi_cred_t list[3];
+    bool nvs_used = false;
+    int n = creds_collect(list, 3, &nvs_used);
+    if (n == 0) {
         ESP_LOGW(TAG, "no wifi credentials (serial: 'wifi set <ssid> <pass>')");
         return ESP_ERR_INVALID_STATE;
     }
 
-    wifi_config_t wc = {0};
-    strlcpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid));
-    strlcpy((char *)wc.sta.password, pass, sizeof(wc.sta.password));
-    esp_wifi_set_config(WIFI_IF_STA, &wc);
-    esp_wifi_connect();
-
-    for (int waited = 0; waited < WIFI_TIMEOUT_MS && !s_wifi_got_ip; waited += 200) {
-        vTaskDelay(pdMS_TO_TICKS(200));
+    bool any_configured = false;
+    for (int i = 0; i < n && !s_wifi_got_ip; i++) {
+        ESP_LOGI(TAG, "wifi connecting: %s%s", list[i].ssid,
+                 (i == 0 && nvs_used) ? " (NVS)" : "");
+        any_configured = true;
+        wifi_try_cred(&list[i]);
+        if (s_wifi_got_ip) {
+            ESP_LOGI(TAG, "wifi connected via %s", list[i].ssid);
+        }
     }
+    (void)any_configured;
     return s_wifi_got_ip ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
@@ -434,10 +479,12 @@ static void auto_check_task(void *arg)
 static int cmd_wifi(int argc, char **argv)
 {
     if (argc == 1) {
-        char ssid[33] = {0}, pass[65] = {0};
-        creds_load(ssid, sizeof(ssid), pass, sizeof(pass));
-        printf("wifi %s, configured ssid: %s\n",
-               s_wifi_got_ip ? "connected" : "not connected", ssid);
+        wifi_cred_t list[3];
+        bool nvs_used = false;
+        creds_collect(list, 3, &nvs_used);
+        printf("wifi %s, configured ssid: %s%s\n",
+               s_wifi_got_ip ? "connected" : "not connected", list[0].ssid,
+               nvs_used ? " (NVS)" : "");
         return 0;
     }
     if (argc == 4 && strcmp(argv[1], "set") == 0) {

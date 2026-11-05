@@ -32,6 +32,7 @@ typedef enum {
     UI_MODE_CALIBRATE,    /* 校准模式 */
     UI_MODE_TOUCH_CAL,    /* 触摸校准向导 */
     UI_MODE_IR,           /* 红外遥控（学习 / 发射） */
+    UI_MODE_RADIO,        /* 网络电台 */
 } ui_mode_t;
 
 /** 触摸校准界面状态 */
@@ -56,6 +57,12 @@ typedef enum {
     UI_BTN_TOUCH_CAL,        /* 重新校准触摸 */
     UI_BTN_OTA,              /* 检查固件更新（OTA） */
     UI_BTN_IR_MODE,          /* 进入红外遥控 */
+    /* 电台模式 */
+    UI_BTN_RADIO_MODE,       /* 进入电台 */
+    UI_BTN_RADIO_PREV,       /* 上一台 */
+    UI_BTN_RADIO_NEXT,       /* 下一台 */
+    UI_BTN_RADIO_TOGGLE,     /* 播放/停止 */
+    UI_BTN_RADIO_BACK,       /* 返回遥控模式 */
     /* 鼠标模式：左右键（按下=按住，抬起=松开，可拖拽） */
     UI_BTN_MOUSE_LEFT,       /* 左键 */
     UI_BTN_MOUSE_RIGHT,      /* 右键 */

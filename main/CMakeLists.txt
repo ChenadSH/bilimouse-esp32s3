@@ -8,6 +8,7 @@ idf_component_register(
         "bsp/bsp_imu.c"
         "bsp/bsp_touch.c"
         "bsp/bsp_ir.c"
+        "bsp/bsp_audio.c"
         "app/settings.c"
         "app/button_fsm.c"
         "app/actions.c"
@@ -19,6 +20,7 @@ idf_component_register(
         "app/ir_store.c"
         "app/ir_backup.c"
         "app/ota_update.c"
+        "app/radio.c"
         "app/cli.c"
         "app/power_mgr.c"
         "ui/ui.c"
@@ -43,6 +45,8 @@ idf_component_register(
         esp_driver_ledc
         esp_driver_rmt
         esp_driver_uart
+        esp_driver_i2s
+        helix_mp3
         esp_partition
         esp_lcd
         esp_timer

@@ -15,6 +15,7 @@
 
 #include "ir_backup.h"
 #include "ota_update.h"
+#include "radio.h"
 
 static const char *TAG = "cli";
 
@@ -31,6 +32,7 @@ esp_err_t cli_start(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "ir_backup register failed: %s", esp_err_to_name(err));
     }
+    radio_register_cli();
     /* ota_update_init 里会注册 wifi/ota 命令（app_main 已调用） */
 
     esp_console_dev_uart_config_t uart_cfg = {
