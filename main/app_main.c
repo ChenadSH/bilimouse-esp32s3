@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -34,8 +35,10 @@
 #include "bsp_imu.h"
 #include "bsp_touch.h"
 #include "calibrate.h"
+#include "cli.h"
 #include "hid_device.h"
 #include "ir_remote.h"
+#include "ota_update.h"
 #include "pointer.h"
 #include "power_mgr.h"
 #include "settings.h"
@@ -166,6 +169,11 @@ static void on_ui_button(ui_button_t btn, void *ctx)
         break;
     case UI_BTN_TOUCH_CAL:
         start_touch_cal();
+        break;
+    case UI_BTN_OTA:
+        ui_show_action("检查更新", "正在准备 WiFi");
+        ui_set_footer("结果看屏幕/串口，全程别断电");
+        ota_update_start_manual();
         break;
     case UI_BTN_IR_MODE:
         enter_ir_mode();
@@ -700,6 +708,19 @@ void app_main(void)
     }
     xTaskCreate(hid_monitor_task, "hid_task", 3072, NULL, 4, NULL);
     power_mgr_start();
+
+    /* 串口命令行：红外码备份 + WiFi/OTA 配置（idf.py monitor 里敲 ir/wifi/ota） */
+    cli_start();
+
+    /* WiFi + OTA（失败不影响其它功能，只是「升级」按钮不可用） */
+    if (ota_update_init() != ESP_OK) {
+        ESP_LOGW(TAG, "ota init failed (在线升级不可用)");
+    }
+
+    /* 走到这里 = 外设、蓝牙、UI 全部就绪：如果本次启动是 OTA 升级后的
+       第一次启动（PENDING_VERIFY 状态），确认新固件有效。
+       不确认的话，下次重启 bootloader 会认为新固件失败并回滚旧版本。 */
+    esp_ota_mark_app_valid_cancel_rollback();
 
     /* 体感（甩腕/翻转）已停用：躺在床上翻身、拿放设备都会误触发，
        实测「暂停/播放」被打断的次数远多于主动使用的次数。

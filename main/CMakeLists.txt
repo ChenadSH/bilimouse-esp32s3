@@ -17,6 +17,9 @@ idf_component_register(
         "app/touch_cal.c"
         "app/ir_remote.c"
         "app/ir_store.c"
+        "app/ir_backup.c"
+        "app/ota_update.c"
+        "app/cli.c"
         "app/power_mgr.c"
         "ui/ui.c"
         "ui/ui_font.c"
@@ -42,6 +45,15 @@ idf_component_register(
         esp_partition
         esp_lcd
         esp_timer
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_http_client
+        esp_https_ota
+        app_update
+        esp_app_format
+        console
+        mbedtls
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-unused-const-variable)

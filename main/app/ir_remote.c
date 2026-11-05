@@ -426,3 +426,37 @@ esp_err_t ir_remote_clear_all(void)
     active_save(0);
     return bank_save();
 }
+
+esp_err_t ir_remote_write_slot(uint8_t slot, const void *syms, uint16_t count)
+{
+    if (!syms || count == 0 || count > BSP_IR_MAX_SYMBOLS ||
+        slot >= IR_SLOT_COUNT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ir_slot_t *dst = &s_bank.slots[slot];
+    memset(dst, 0, sizeof(*dst));
+    dst->count = count;
+    memcpy(dst->syms, syms, count * sizeof(rmt_symbol_word_t));
+    ESP_LOGI(TAG, "slot %u imported: %u symbols", slot, (unsigned)count);
+    return bank_save();
+}
+
+uint32_t ir_remote_bank_seq(void)
+{
+    return s_bank.seq;
+}
+
+esp_err_t ir_remote_read_slot(uint8_t slot, void *syms, uint16_t *count)
+{
+    if (!syms || !count || slot >= IR_SLOT_COUNT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint16_t n = s_bank.slots[slot].count;
+    if (n == 0) {
+        *count = 0;
+        return ESP_ERR_NOT_FOUND;
+    }
+    memcpy(syms, s_bank.slots[slot].syms, n * sizeof(rmt_symbol_word_t));
+    *count = n;
+    return ESP_OK;
+}

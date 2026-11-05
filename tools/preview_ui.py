@@ -174,10 +174,19 @@ def main():
             fill(x + 8, y + h - 3, w - 16, 3, accent)
             t = tw(label)
             tx = x + (w - t) // 2
-            if t > w - 8:
-                overflow.append("%s: '%s' %dpx > %dpx" % (mode, label, t, w - 8))
-                tx = x + 4
-            text(tx, y + (h - 16) // 2, label, COL_TEXT)
+            if tx < x + 2:
+                tx = x + 2
+            # 与 ui.c draw_button 同步：居中，可用宽度 w-4（超宽截断并报 overflow）
+            if t > w - 4:
+                overflow.append("%s: '%s' %dpx > %dpx" % (mode, label, t, w - 4))
+            stop = tx + (w - 4)
+            cx = tx
+            for ch in label:
+                cw = 8 if 0x20 <= ord(ch) <= 0x7E else 16
+                if cx + cw > stop:
+                    break
+                text(cx, y + (h - 16) // 2, ch, COL_TEXT)
+                cx += cw
 
         # 顶栏
         fill(0, 0, SCR_W, 26, COL_PANEL)

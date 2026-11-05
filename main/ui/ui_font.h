@@ -21,7 +21,7 @@ extern "C" {
 #define UI_FONT_ASCII_W     8
 #define UI_FONT_ASCII_H     16
 
-#define UI_FONT_CJK_COUNT   271
+#define UI_FONT_CJK_COUNT   310
 #define UI_FONT_ASCII_COUNT 95
 #define UI_FONT_ASCII_FIRST 0x20
 #define UI_FONT_ASCII_LAST  0x7E

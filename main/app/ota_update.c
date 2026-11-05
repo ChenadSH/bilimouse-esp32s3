@@ -1,0 +1,511 @@
+/**
+ * @file ota_update.c
+ * @brief WiFi STA + manifest 检查 + esp_https_ota 流式升级
+ *
+ * WiFi 凭据优先级：NVS（串口 `wifi set`）> Kconfig 编译期默认。
+ * manifest 地址同理：NVS（`ota url`）> Kconfig BILIMOUSE_OTA_URL。
+ */
+#include "ota_update.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+#include "esp_app_desc.h"
+#include "esp_event.h"
+#include "esp_http_client.h"
+#include "esp_https_ota.h"
+#include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_ota_ops.h"
+#include "esp_system.h"
+#include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "nvs.h"
+
+#include "power_mgr.h"
+#include "sdkconfig.h"
+#include "ui.h"
+
+static const char *TAG = "ota";
+
+#define NVS_NS          "bilimouse"
+#define NVS_KEY_SSID    "wifi_ssid"
+#define NVS_KEY_PASS    "wifi_pass"
+#define NVS_KEY_OTA_URL "ota_url"
+
+#define WIFI_TIMEOUT_MS   20000
+#define OTA_TASK_STACK    9216
+#define AUTO_CHECK_DELAY_S 30
+
+/* ==================== WiFi ==================== */
+
+static bool s_wifi_inited;
+static volatile bool s_wifi_got_ip;
+static esp_event_handler_instance_t s_ev_any;
+static esp_event_handler_instance_t s_ev_ip;
+
+static void wifi_event_cb(void *arg, esp_event_base_t base,
+                          int32_t id, void *data)
+{
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_wifi_got_ip = false;
+        ESP_LOGW(TAG, "wifi disconnected, retrying...");
+        esp_wifi_connect();
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
+        s_wifi_got_ip = true;
+        ESP_LOGI(TAG, "wifi got ip: " IPSTR, IP2STR(&ev->ip_info.ip));
+    }
+}
+
+static esp_err_t wifi_init_once(void)
+{
+    if (s_wifi_inited) {
+        return ESP_OK;
+    }
+    esp_err_t err = esp_netif_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = esp_event_loop_create_default();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        return err;
+    }
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    err = esp_wifi_init(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_init: %s", esp_err_to_name(err));
+        return err;
+    }
+    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                        wifi_event_cb, NULL, &s_ev_any);
+    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                        wifi_event_cb, NULL, &s_ev_ip);
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_start();
+    s_wifi_inited = true;
+    return ESP_OK;
+}
+
+/** 读凭据：NVS 覆盖 Kconfig */
+static bool creds_load(char *ssid, size_t ssid_len,
+                       char *pass, size_t pass_len)
+{
+    nvs_handle_t h;
+    bool got = false;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        size_t l1 = ssid_len, l2 = pass_len;
+        got = (nvs_get_str(h, NVS_KEY_SSID, ssid, &l1) == ESP_OK &&
+               nvs_get_str(h, NVS_KEY_PASS, pass, &l2) == ESP_OK);
+        nvs_close(h);
+    }
+    if (!got) {
+        strlcpy(ssid, CONFIG_BILIMOUSE_WIFI_SSID, ssid_len);
+        strlcpy(pass, CONFIG_BILIMOUSE_WIFI_PASS, pass_len);
+        got = ssid[0] != '\0';
+    }
+    return got;
+}
+
+bool ota_update_wifi_connected(void)
+{
+    return s_wifi_got_ip;
+}
+
+static esp_err_t wifi_ensure_connected(void)
+{
+    esp_err_t err = wifi_init_once();
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (s_wifi_got_ip) {
+        return ESP_OK;
+    }
+
+    char ssid[33] = {0}, pass[65] = {0};
+    if (!creds_load(ssid, sizeof(ssid), pass, sizeof(pass))) {
+        ESP_LOGW(TAG, "no wifi credentials (serial: 'wifi set <ssid> <pass>')");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    wifi_config_t wc = {0};
+    strlcpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid));
+    strlcpy((char *)wc.sta.password, pass, sizeof(wc.sta.password));
+    esp_wifi_set_config(WIFI_IF_STA, &wc);
+    esp_wifi_connect();
+
+    for (int waited = 0; waited < WIFI_TIMEOUT_MS && !s_wifi_got_ip; waited += 200) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    return s_wifi_got_ip ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+/* ==================== manifest ==================== */
+
+typedef struct {
+    char version[24];
+    char url[192];
+    char notes[96];
+} ota_manifest_t;
+
+/** manifest URL：NVS 覆盖 Kconfig */
+static bool manifest_url_get(char *buf, size_t len)
+{
+    nvs_handle_t h;
+    bool got = false;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        size_t l = len;
+        got = (nvs_get_str(h, NVS_KEY_OTA_URL, buf, &l) == ESP_OK);
+        nvs_close(h);
+    }
+    if (!got) {
+        strlcpy(buf, CONFIG_BILIMOUSE_OTA_URL, len);
+    }
+    return buf[0] != '\0';
+}
+
+/** 解析 "MAJOR.MINOR.PATCH"，失败返回 -1 */
+static long semver_field(const char **p)
+{
+    char *end;
+    long v = strtol(*p, &end, 10);
+    *p = end;
+    return v;
+}
+
+/** >0: a 更新; <0: b 更新; 0: 相同。容忍 2 段/3 段版本号 */
+static int semver_cmp(const char *a, const char *b)
+{
+    const char *pa = a, *pb = b;
+    for (int i = 0; i < 3; i++) {
+        long va = semver_field(&pa);
+        long vb = semver_field(&pb);
+        if (va != vb) {
+            return (va > vb) ? 1 : -1;
+        }
+        if (*pa == '.') pa++;
+        if (*pb == '.') pb++;
+        if (!*pa && !*pb) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+/** HTTP GET manifest 并解析 JSON。失败返回错误码。 */
+static esp_err_t manifest_fetch(ota_manifest_t *m)
+{
+    char url[256];
+    if (!manifest_url_get(url, sizeof(url))) {
+        ESP_LOGW(TAG, "manifest url empty (serial: 'ota url <http://...>')");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .timeout_ms = 10000,
+        .buffer_size = 2048,
+    };
+    esp_http_client_handle_t cli = esp_http_client_init(&cfg);
+    if (!cli) {
+        return ESP_FAIL;
+    }
+    esp_err_t err = esp_http_client_open(cli, 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "manifest open failed (%s): %s", esp_err_to_name(err), url);
+        esp_http_client_cleanup(cli);
+        return err;
+    }
+    int status = esp_http_client_fetch_headers(cli);
+    (void)status;
+    int code = esp_http_client_get_status_code(cli);
+
+    char body[1024] = {0};
+    int n = 0, total = 0;
+    while (total < (int)sizeof(body) - 1 &&
+           (n = esp_http_client_read(cli, body + total, sizeof(body) - 1 - total)) > 0) {
+        total += n;
+    }
+    esp_http_client_cleanup(cli);
+
+    if (code != 200 || total <= 0) {
+        ESP_LOGW(TAG, "manifest http %d, %d bytes (%s)", code, total, url);
+        return ESP_ERR_NOT_FOUND;
+    }
+    body[total] = '\0';
+
+    /* 只提取三个字符串字段，手写扫描比引 cJSON 少一层依赖：
+       manifest 是我们自己发布的，格式固定，没必要上完整 JSON 解析器。 */
+    memset(m, 0, sizeof(*m));
+    const char *v = strstr(body, "\"version\"");
+    const char *u = strstr(body, "\"url\"");
+    if (v) {
+        v = strchr(v + 9, '"');
+        if (v) strlcpy(m->version, v + 1, sizeof(m->version));
+        char *q = strchr(m->version, '"');
+        if (q) *q = '\0';
+    }
+    if (u) {
+        u = strchr(u + 5, '"');
+        if (u) strlcpy(m->url, u + 1, sizeof(m->url));
+        char *q = strchr(m->url, '"');
+        if (q) *q = '\0';
+    }
+    if (m->version[0] == '\0' || m->url[0] == '\0') {
+        ESP_LOGW(TAG, "manifest missing version/url");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    ESP_LOGI(TAG, "manifest: version=%s url=%s", m->version, m->url);
+    return ESP_OK;
+}
+
+/* ==================== 升级执行 ==================== */
+
+/** 下载 + 写 flash + 切启动分区。成功不返回（重启）。 */
+static esp_err_t ota_perform(const ota_manifest_t *m)
+{
+    esp_http_client_config_t http_cfg = {
+        .url = m->url,
+        .timeout_ms = 20000,
+        .buffer_size = 4096,
+        .keep_alive_enable = false,
+    };
+    esp_https_ota_config_t ota_cfg = {
+        .http_config = &http_cfg,
+    };
+
+    esp_https_ota_handle_t h = NULL;
+    esp_err_t err = esp_https_ota_begin(&ota_cfg, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ota begin failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    /* 读到镜像头后先看一眼新固件的版本，再决定要不要继续 */
+    esp_app_desc_t desc;
+    while ((err = esp_https_ota_perform(h)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+        if (esp_https_ota_get_image_len_read(h) >= (int)sizeof(esp_image_header_t) + (int)sizeof(esp_image_segment_header_t) &&
+            esp_https_ota_get_img_desc(h, &desc) == ESP_OK) {
+            ESP_LOGI(TAG, "remote image version: %s", desc.version);
+            ui_show_action("升级中", desc.version);
+        }
+        int total = esp_https_ota_get_image_size(h);
+        int read = esp_https_ota_get_image_len_read(h);
+        if (total > 0) {
+            char sub[64];
+            snprintf(sub, sizeof(sub), "下载 %d%%", read * 100 / total);
+            ui_show_action("升级中", sub);
+            power_mgr_notify_activity();   /* 别让屏幕在升级途中睡着 */
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ota download failed: %s", esp_err_to_name(err));
+        esp_https_ota_abort(h);
+        return err;
+    }
+
+    err = esp_https_ota_finish(h);   /* 内部已做镜像校验 + set_boot_partition */
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ota finish failed: %s", esp_err_to_name(err));
+        if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
+            ESP_LOGE(TAG, "image validation failed - keeping old firmware");
+        }
+        return err;
+    }
+    ESP_LOGI(TAG, "ota complete, boot partition switched");
+    return ESP_OK;
+}
+
+/** 升级任务的主体：连网 -> 比版本 -> 下载 -> 倒计时重启。
+ *  自动模式下失败一律静默（不能每 30 秒骚扰一次屏幕），
+ *  手动模式下失败给出屏幕提示 + 串口原因。 */
+static void ota_run(bool auto_triggered)
+{
+    power_mgr_notify_activity();
+
+    /* ---- 1. 确保 WiFi 在线 ---- */
+    if (!ota_update_wifi_connected()) {
+        if (!auto_triggered) {
+            ui_show_action("检查更新", "连接 WiFi 中");
+        }
+        esp_err_t e = wifi_ensure_connected();
+        if (e != ESP_OK) {
+            ESP_LOGW(TAG, "wifi connect failed: %s", esp_err_to_name(e));
+            if (!auto_triggered) {
+                ui_show_action("检查更新失败",
+                               e == ESP_ERR_INVALID_STATE ? "未配置 WiFi" : "连接超时");
+                ui_set_footer("串口: wifi set <ssid> <pass>");
+            }
+            return;
+        }
+    }
+
+    /* ---- 2. 拉取版本清单 ---- */
+    ota_manifest_t m;
+    esp_err_t e = manifest_fetch(&m);
+    if (e != ESP_OK) {
+        if (!auto_triggered) {
+            ui_show_action("检查更新失败", "无法获取清单");
+            ui_set_footer("串口: ota url <manifest 地址>");
+        }
+        return;
+    }
+
+    /* ---- 3. 版本比较 ---- */
+    const esp_app_desc_t *cur = esp_app_get_description();
+    int cmp = semver_cmp(m.version, cur->version);
+    if (cmp <= 0) {
+        ESP_LOGI(TAG, "firmware up to date (%s)", cur->version);
+        if (!auto_triggered) {
+            char sub[64];
+            snprintf(sub, sizeof(sub), "当前 %s 已是最新", cur->version);
+            ui_show_action("已是最新", sub);
+        }
+        return;
+    }
+
+    char sub[64];
+    snprintf(sub, sizeof(sub), "%s -> %s", cur->version, m.version);
+    ui_show_action("发现新版本", sub);
+    ESP_LOGI(TAG, "new version available: %s -> %s", cur->version, m.version);
+    power_mgr_notify_activity();
+
+    /* ---- 4. 下载写入备槽 ---- */
+    if (ota_perform(&m) != ESP_OK) {
+        ui_show_action("升级失败", "旧固件继续运行");
+        ui_set_footer("原因见串口日志");
+        return;
+    }
+
+    /* ---- 5. 倒计时重启进新固件。
+            新固件启动在 PENDING_VERIFY 状态，app_main 走完才确认；
+            若新固件起不来，bootloader 自动回滚旧版本。 ---- */
+    ui_show_action("升级完成", "5 秒后重启");
+    for (int i = 5; i > 0; i--) {
+        char s[24];
+        snprintf(s, sizeof(s), "%d 秒后重启", i);
+        ui_show_hint(s);
+        power_mgr_notify_activity();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    esp_restart();
+}
+
+static void ota_manual_task(void *arg)
+{
+    (void)arg;
+    ota_run(false);
+    vTaskDelete(NULL);
+}
+
+void ota_update_start_manual(void)
+{
+    xTaskCreate(ota_manual_task, "ota_task", OTA_TASK_STACK, NULL, 3, NULL);
+}
+
+/* ==================== 自动检查 ==================== */
+
+#if CONFIG_BILIMOUSE_OTA_AUTO_CHECK
+static void auto_check_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(AUTO_CHECK_DELAY_S * 1000));
+    /* 自动流程不弹错误提示（WiFi 没配好就静默跳过），只在
+       确认发现新版本时才打扰用户。 */
+    ota_run(true);
+    vTaskDelete(NULL);
+}
+#endif
+
+/* ==================== 串口命令 ==================== */
+
+#include "esp_console.h"
+
+static int cmd_wifi(int argc, char **argv)
+{
+    if (argc == 1) {
+        char ssid[33] = {0}, pass[65] = {0};
+        creds_load(ssid, sizeof(ssid), pass, sizeof(pass));
+        printf("wifi %s, configured ssid: %s\n",
+               s_wifi_got_ip ? "connected" : "not connected", ssid);
+        return 0;
+    }
+    if (argc == 4 && strcmp(argv[1], "set") == 0) {
+        nvs_handle_t h;
+        if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+            printf("error: nvs not ready\n");
+            return 1;
+        }
+        nvs_set_str(h, NVS_KEY_SSID, argv[2]);
+        nvs_set_str(h, NVS_KEY_PASS, argv[3]);
+        nvs_commit(h);
+        nvs_close(h);
+        printf("ok: credentials saved, connecting...\n");
+        s_wifi_got_ip = false;
+        wifi_ensure_connected();
+        printf("wifi %s\n", s_wifi_got_ip ? "connected" : "FAILED (check ssid/pass)");
+        return 0;
+    }
+    printf("usage: wifi | wifi set <ssid> <pass>\n");
+    return 1;
+}
+
+static int cmd_ota(int argc, char **argv)
+{
+    if (argc >= 3 && strcmp(argv[1], "url") == 0) {
+        nvs_handle_t h;
+        if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+            printf("error: nvs not ready\n");
+            return 1;
+        }
+        nvs_set_str(h, NVS_KEY_OTA_URL, argv[2]);
+        nvs_commit(h);
+        nvs_close(h);
+        printf("ok: manifest url saved\n");
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "check") == 0) {
+        ota_update_start_manual();
+        printf("check started, watch the screen / serial log\n");
+        return 0;
+    }
+    printf("usage: ota url <manifest-url> | ota check\n");
+    return 1;
+}
+
+/* ==================== 初始化 ==================== */
+
+esp_err_t ota_update_init(void)
+{
+    esp_err_t err = wifi_init_once();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi init failed: %s (OTA 不可用，其余功能不受影响)",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    esp_console_cmd_t wifi_cmd = {
+        .command = "wifi",
+        .help = "Show/set WiFi credentials for OTA",
+        .hint = "[set <ssid> <pass>]",
+        .func = cmd_wifi,
+    };
+    esp_console_cmd_t ota_cmd = {
+        .command = "ota",
+        .help = "OTA: set manifest url / start check",
+        .hint = "url <url> | check",
+        .func = cmd_ota,
+    };
+    esp_console_cmd_register(&wifi_cmd);
+    esp_console_cmd_register(&ota_cmd);
+
+#if CONFIG_BILIMOUSE_OTA_AUTO_CHECK
+    xTaskCreate(auto_check_task, "ota_auto", 4096, NULL, 2, NULL);
+#endif
+    return ESP_OK;
+}

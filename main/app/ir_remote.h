@@ -59,6 +59,25 @@ uint8_t ir_remote_loaded_count(void);
 /** 清空全部学习记录 */
 esp_err_t ir_remote_clear_all(void);
 
+/**
+ * 覆写指定槽（红外码导入用）。
+ * @param count 1..96
+ * @return ESP_OK 写入并保存到 NVS+irbank 双副本
+ */
+esp_err_t ir_remote_write_slot(uint8_t slot,
+                               const void *syms, uint16_t count);
+
+/** 当前码库的保存序号（导出/导入诊断用） */
+uint32_t ir_remote_bank_seq(void);
+
+/**
+ * 读取指定槽的原始波形（红外码导出用）。
+ * @param[out] count 实际符号数，空槽为 0
+ * @return ESP_OK；ESP_ERR_NOT_FOUND 槽为空；ESP_ERR_INVALID_ARG 参数错误
+ */
+esp_err_t ir_remote_read_slot(uint8_t slot, void *syms, uint16_t *count);
+
+
 #ifdef __cplusplus
 }
 #endif

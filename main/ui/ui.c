@@ -54,9 +54,12 @@ typedef struct {
 /* 遥控模式按钮：主按钮行（三个大按钮，横向均分 320px） */
 #define MAIN_BTN_Y      96
 #define MAIN_BTN_H      64
-/* 次按钮行（五个按钮，横向均分 320px） */
+/* 次按钮行：7 个小按钮（音量- 音量+ 全屏 鼠标 红外 校准 升级）。
+   44px 宽 + 1px 间距，x = 3, 48, 93, 138, 183, 228, 273（末尾到 317）。
+   坐标写字面量：preview_ui.py 按数字解析按钮表，带参宏解析不了。 */
 #define SUB_BTN_Y       160
 #define SUB_BTN_H       54
+#define SUB_BTN_W       44
 
 static const btn_def_t s_main_btns[] = {
     { UI_BTN_PREV_EPISODE,   6,  MAIN_BTN_Y, 100, MAIN_BTN_H, "上一集", COL_ACCENT },
@@ -67,12 +70,13 @@ static const btn_def_t s_main_btns[] = {
 #define MAIN_BTN_CNT  (sizeof(s_main_btns) / sizeof(s_main_btns[0]))
 
 static const btn_def_t s_sub_btns[] = {
-    { UI_BTN_VOLUME_DOWN,   3,  SUB_BTN_Y, 49, SUB_BTN_H, "音量-", COL_SUBTEXT },
-    { UI_BTN_VOLUME_UP,    55,  SUB_BTN_Y, 49, SUB_BTN_H, "音量+", COL_SUBTEXT },
-    { UI_BTN_FULLSCREEN,  107,  SUB_BTN_Y, 49, SUB_BTN_H, "全屏",  COL_SUBTEXT },
-    { UI_BTN_MOUSE_MODE,  159,  SUB_BTN_Y, 49, SUB_BTN_H, "鼠标",  COL_SUBTEXT },
-    { UI_BTN_IR_MODE,     211,  SUB_BTN_Y, 49, SUB_BTN_H, "红外",  COL_SUBTEXT },
-    { UI_BTN_TOUCH_CAL,   263,  SUB_BTN_Y, 49, SUB_BTN_H, "校准",  COL_SUBTEXT },
+    { UI_BTN_VOLUME_DOWN,     3, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "音量-", COL_SUBTEXT },
+    { UI_BTN_VOLUME_UP,      48, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "音量+", COL_SUBTEXT },
+    { UI_BTN_FULLSCREEN,     93, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "全屏",  COL_SUBTEXT },
+    { UI_BTN_MOUSE_MODE,    138, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "鼠标",  COL_SUBTEXT },
+    { UI_BTN_IR_MODE,       183, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "红外",  COL_SUBTEXT },
+    { UI_BTN_TOUCH_CAL,     228, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "校准",  COL_SUBTEXT },
+    { UI_BTN_OTA,           273, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "升级",  COL_SUBTEXT },
 };
 
 #define SUB_BTN_CNT  (sizeof(s_sub_btns) / sizeof(s_sub_btns[0]))
@@ -347,12 +351,14 @@ static void draw_button(int x, int y, int w, int h, const char *label, uint16_t 
     fill_rect(x + 8, y + h - 3, w - 16, 3, accent);
 
     int tw = text_width(label);
+    /* 44px 的小按钮放"音量-"(40px) 时只剩 2px 边距：居中并放宽裁剪，
+       代替以前的"超宽就左对齐截断"策略 */
     int tx = x + (w - tw) / 2;
-    if (tw > w - 8) {
-        tx = x + 4;
+    if (tx < x + 2) {
+        tx = x + 2;
     }
     int ty = y + (h - 16) / 2;
-    draw_text(tx, ty, label, COL_TEXT, w - 8);
+    draw_text(tx, ty, label, COL_TEXT, w - 4);
 }
 
 static void draw_btn_group(const btn_def_t *btns, size_t cnt)

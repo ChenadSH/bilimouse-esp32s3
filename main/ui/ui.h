@@ -54,6 +54,7 @@ typedef enum {
     UI_BTN_FULLSCREEN,       /* 全屏 */
     UI_BTN_MOUSE_MODE,       /* 鼠标模式开关 */
     UI_BTN_TOUCH_CAL,        /* 重新校准触摸 */
+    UI_BTN_OTA,              /* 检查固件更新（OTA） */
     UI_BTN_IR_MODE,          /* 进入红外遥控 */
     /* 鼠标模式：左右键（按下=按住，抬起=松开，可拖拽） */
     UI_BTN_MOUSE_LEFT,       /* 左键 */
