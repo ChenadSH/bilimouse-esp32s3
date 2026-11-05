@@ -221,6 +221,16 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
         s_adv_active = false;
         break;
 
+    case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT:
+        /* 记录主机最终接受的连接参数。这是排查"点击/拖拽丢失"的关键数据：
+           若实际间隔很长（>50ms），一次短按下可能和松开落进同一个
+           连接事件，被主机折叠成"什么都没发生"。 */
+        ESP_LOGI(TAG, "conn params: interval=%.2fms (%d), latency=%d",
+                 param->update_conn_params.conn_int * 1.25f,
+                 param->update_conn_params.conn_int,
+                 param->update_conn_params.latency);
+        break;
+
     case ESP_GAP_BLE_SEC_REQ_EVT:
         esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
         break;
@@ -551,20 +561,26 @@ esp_err_t hid_mouse_click(uint8_t button)
         return ESP_ERR_INVALID_STATE;
     }
     /*
-     * 标准蓝牙鼠标的点击就是两次纯按键报告（零位移）：
-     *   down(0,0) -> 保持几十毫秒 -> up(0,0)
+     * 一次可靠的单击 = 纯按键报告 down -> 保持 -> up，零位移。
      *
-     * 历史教训，防止以后有人"优化"回去：
-     *   - 早期"点击无效"的真根因是报告 5 字节 vs 描述符 4 字节，
-     *     整包被主机丢弃 —— 和按住时长、抖动都无关；
-     *   - v2.x 曾加过 ±1px 位移抖动来绕"报告折叠"，但 Apple 的
-     *     事件管线把"按住期间有位移"归为拖拽，带位移的 down/up
-     *     反而会让点击变成一次 0px 拖拽（macOS/iOS 点击失效）。
-     *     BleMouse 等在 macOS/iOS 上验证可用的实现都是纯按键报告。
-     *   - 按住时长保留 40ms：太短（<10ms）仍可能被采样间隔吞掉。
+     * 必须满足的条件（历史上每一环都踩过）：
+     *   1. 报告长度必须等于描述符声明的字节数（本工程 4 字节）。
+     *   2. 按下保持 >= 120ms。两个原因：
+     *      a) 真实鼠标一次点击的按下时长就是 80~120ms；
+     *      b) 若 down/up 落进同一个 BLE 连接事件，Apple 主机会把它们
+     *         折叠成"什么都没发生"（实测笔记 espkvm 证实）。我们请求的
+     *         连接间隔是 7.5~15ms，但主机有权拒绝；保持 120ms 保证
+     *         即使间隔被谈到 50ms，down 和 up 也分属不同连接事件。
+     *   3. 不能带位移：Apple 把"按住期间有位移"归为拖拽（曾经的
+     *      ±1px 抖动就是这样把点击变成 0px 拖拽的）。
      */
+    esp_gap_conn_params_t cp;
+    if (esp_ble_get_current_conn_params(s_peer_bda, &cp) == ESP_OK) {
+        ESP_LOGD(TAG, "click: conn interval %.2fms, btn=0x%02x",
+                 cp.interval * 1.25f, button);
+    }
     esp_hidd_send_mouse_value(s_conn_id, button, 0, 0);
-    vTaskDelay(pdMS_TO_TICKS(40));
+    vTaskDelay(pdMS_TO_TICKS(120));
     esp_hidd_send_mouse_value(s_conn_id, 0, 0, 0);
     ESP_LOGI(TAG, "mouse click btn=0x%02x", button);
     return ESP_OK;

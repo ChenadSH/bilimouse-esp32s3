@@ -2,29 +2,28 @@ menu "BiliMouse"
 
     config BILIMOUSE_WIFI_SSID
         string "默认 WiFi SSID（OTA 升级用）"
-        default "my-home-wifi"
+        default "WPP-Guest"
         help
-            设备启动后会用这个 SSID 连接家庭 WiFi 检查固件更新。
+            设备启动后会用这个 SSID 连接 WiFi 检查固件更新。
             可通过串口命令 `wifi set <ssid> <pass>` 覆盖（存 NVS，优先级更高）。
 
     config BILIMOUSE_WIFI_PASS
         string "默认 WiFi 密码"
-        default "password123"
+        default "connected"
         help
             与 BILIMOUSE_WIFI_SSID 配对使用。串口命令设置的凭据优先。
 
     config BILIMOUSE_OTA_URL
         string "OTA manifest 地址"
-        default "http://192.168.1.100:8070/bilimouse/manifest.json"
+        default "https://raw.githubusercontent.com/CHANGE-ME/bilimouse-ota/main/manifest.json"
         help
-            固件版本清单（JSON）的 URL，格式见 docs/OTA.md。
+            固件版本清单（JSON）的 URL，格式与 GitHub 部署方法见 docs/OTA.md。
             可通过串口命令 `ota url <url>` 覆盖（存 NVS，优先级更高）。
 
     config BILIMOUSE_OTA_AUTO_CHECK
         bool "开机自动检查并安装更新"
-        default y
+        default n
         help
-            开机 30 秒后后台检查 manifest；发现新版本就自动下载、
-            切换启动分区并在 5 秒倒计时后重启。关闭后只能通过
-            屏幕上的「升级」按钮手动触发。
+            开启后开机 30 秒自动检查并静默安装更新。
+            默认关闭：只通过屏幕上的「升级」按钮手动触发。
 endmenu

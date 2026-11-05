@@ -12,6 +12,7 @@
 #include <stdlib.h>
 
 #include "esp_app_desc.h"
+#include "esp_crt_bundle.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
@@ -209,6 +210,9 @@ static esp_err_t manifest_fetch(ota_manifest_t *m)
         .url = url,
         .timeout_ms = 10000,
         .buffer_size = 2048,
+        /* GitHub / gitee / 自建 HTTPS 都能过校验：证书包内置主流 CA 根证书。
+           局域网 http:// 地址不受影响（bundle 只对 https 生效）。 */
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t cli = esp_http_client_init(&cfg);
     if (!cli) {
@@ -273,6 +277,7 @@ static esp_err_t ota_perform(const ota_manifest_t *m)
         .timeout_ms = 20000,
         .buffer_size = 4096,
         .keep_alive_enable = false,
+        .crt_bundle_attach = esp_crt_bundle_attach,   /* 同 manifest：支持 GitHub HTTPS */
     };
     esp_https_ota_config_t ota_cfg = {
         .http_config = &http_cfg,

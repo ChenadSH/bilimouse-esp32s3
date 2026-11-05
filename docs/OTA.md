@@ -141,7 +141,79 @@ publish/
 python -m http.server 8070
 ```
 
-### 2.2 设备端配置（一次性）
+### 2.2 用 GitHub 仓库做 OTA 服务器（推荐，公网可用）
+
+设备固件已内置主流 CA 根证书包（`esp_crt_bundle_attach`），可以直接走
+GitHub 的 HTTPS，不需要任何后端代码。**一个纯静态仓库就够**。
+
+#### 方式 A：独立发布仓库（推荐）
+
+1. 新建一个公开仓库，例如 `yourname/bilimouse-ota`，放入两个文件：
+
+   ```
+   bilimouse-ota/
+   ├── manifest.json
+   └── bilimouse-2.4.0.bin      # 把 build/bilimouse.bin 改名放进来
+   ```
+
+2. `manifest.json`（`url` 必须写完整的 raw 链接）：
+
+   ```json
+   {
+     "version": "2.4.0",
+     "url": "https://raw.githubusercontent.com/yourname/bilimouse-ota/main/bilimouse-2.4.0.bin",
+     "notes": "修复点击/拖拽"
+   }
+   ```
+
+3. 设备端填一次地址（存 NVS，之后不用再动）：
+
+   ```
+   bilimouse> ota url https://raw.githubusercontent.com/yourname/bilimouse-ota/main/manifest.json
+   ```
+
+4. **发布新版本**：把新的 `.bin` 传上去（GitHub 网页 Add file → Upload files，
+   或 git push），然后**只改 `manifest.json` 里的 `version` 和 `url` 两个字符串**，
+   提交即可。设备下次点「升级」就会拿到新版本。
+
+#### 方式 B：GitHub Releases（不用每次改仓库文件）
+
+1. 在固件仓库打 release：`Releases → Draft a new release`，tag 填
+   `v2.4.0`，把 `bilimouse.bin` 和一份 `manifest.json` 作为附件上传：
+
+   ```json
+   {
+     "version": "2.4.0",
+     "url": "https://github.com/yourname/bilimouse-ota/releases/latest/download/bilimouse.bin",
+     "notes": "..."
+   }
+   ```
+
+2. `releases/latest/download/<文件名>` 是 GitHub 提供的**永久重定向链接**，
+   永远指向最新 release 的同名附件。把这个链接（manifest 或 bin 均可）
+   填给设备即可，以后发新版本只需要传新 release，什么都不用改。
+   设备端 `esp_http_client` 默认跟随 302 重定向。
+
+#### 方式 C：GitHub Pages（链接最短）
+
+仓库 `Settings → Pages → Deploy from branch` 选 `main` / `root`，
+文件通过 `https://yourname.github.io/bilimouse-ota/manifest.json` 访问。
+.bin 同样放仓库根目录，manifest 的 `url` 写 Pages 域名下的地址。
+
+#### 三种方式怎么选
+
+| 方式 | 每次发版的动作 | 适用 |
+|---|---|---|
+| A 独立仓库 | 传 .bin + 改 manifest 两行 | **最直观，推荐** |
+| B Releases | 只传新 release | 版本多、嫌改 manifest 烦 |
+| C Pages | git push | 想要好看的固定域名 |
+
+> 注意：仓库必须**公开**（私有仓库的 raw 链接需要 token）。WiFi 凭据
+> （WPP-Guest）已写入固件默认值，NVS 里的设置优先；manifest 地址同样
+> 已有编译期默认（`Kconfig.projbuild` 里的 `BILIMOUSE_OTA_URL`），改成
+> 你的仓库地址后烧录即生效，不用再敲串口命令。
+
+### 2.3 设备端配置（一次性）
 
 `idf.py monitor` 里：
 
@@ -158,12 +230,12 @@ WiFi 凭据和 manifest 地址都存 NVS，掉电不丢；
 Kconfig 里的 `BILIMOUSE_WIFI_SSID/PASS/OTA_URL` 只是出厂默认值，
 被 NVS 覆盖。
 
-### 2.3 触发升级
+### 2.4 触发升级
 
 - **屏幕**：遥控模式 → 次行「升级」按钮；
 - **串口**：`ota check`。
 
-### 2.4 长期方案（可选）
+### 2.5 自建服务器（可选）
 
 | 场景 | 建议 |
 |---|---|
@@ -180,8 +252,8 @@ Kconfig 里的 `BILIMOUSE_WIFI_SSID/PASS/OTA_URL` 只是出厂默认值，
 
 | 方式 | 入口 | 行为 |
 |---|---|---|
-| 自动 | 开机 30s 后（`BILIMOUSE_OTA_AUTO_CHECK=y`） | 有新版→直接升级→自动重启；失败**静默** |
-| 手动 | 屏幕按钮 / `ota check` | 每一步都有屏幕提示，失败给出原因 |
+| **手动（默认唯一方式）** | 屏幕「升级」按钮 / 串口 `ota check` | 每一步都有屏幕提示，失败给出原因 |
+| 自动（可选编译项） | 开机 30s 后（`BILIMOUSE_OTA_AUTO_CHECK=y`） | 有新版→直接升级→自动重启；失败**静默**。**默认关闭**，用户要求只保留手动按钮 |
 
 ### 3.2 完整流程
 
