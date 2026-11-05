@@ -11,7 +11,7 @@ import struct
 SECTOR = 4096
 HDR = 16
 MAGIC = 0x49525354  # "IRST"
-MAX_REC = 2048
+MAX_REC = 4080      # 10 槽红外码库 3892B，贴着扇区上限
 
 HDR_FMT = "<IIII"   # magic, seq, len, crc
 ZERO = b"\xff" * SECTOR

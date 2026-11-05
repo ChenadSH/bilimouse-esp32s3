@@ -65,6 +65,9 @@ def parse_ui_layout():
     不会再出现"预览是旧的、屏幕是新的"。
     """
     src = open(os.path.join(PROJECT, "main", "ui", "ui.c"), encoding="utf-8").read()
+    # 先剥掉注释，否则 #define 行尾的 /* ... */ 会让整行匹配失败
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    src = re.sub(r"//[^\n]*", "", src)
 
     defines = {"SCR_W": SCR_W, "SCR_H": SCR_H}
     for m in re.finditer(r"^#define\s+(\w+)\s+([0-9A-Za-z_+\-*/()\s]+)$",
@@ -108,7 +111,7 @@ def main():
         ("鼠标模式", groups.get("mouse", []),
          "鼠标模式", "两侧=左右键", "中间拖动=移动"),
         ("红外遥控", groups.get("ir", []),
-         "红外遥控", "槽 1/4 空 已学 0 个", "学习=复制 发射=回放"),
+         "红外遥控", "槽 1/10 空 已学 0 个", "学习=复制 发射=回放"),
         ("校准模式", groups.get("cal", []),
          "校准模式", "点住红框松手记录", "3 个点，跟着红框走"),
     ]

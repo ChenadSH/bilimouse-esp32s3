@@ -29,8 +29,9 @@
 extern "C" {
 #endif
 
-/** 单条记录上限（要小于 4KB 扇区 - 16 字节头） */
-#define IR_STORE_MAX_REC  2048
+/** 单条记录上限（不得超过 4KB 扇区 - 16 字节头 = 4080）。
+ *  10 槽 × 388B + 12B 头 = 3892B，贴着上限放，改槽数时注意同步扩分区。 */
+#define IR_STORE_MAX_REC  4080
 
 /** 初始化：定位 irbank 分区。分区不存在时返回错误，但不算致命 */
 esp_err_t ir_store_init(void);

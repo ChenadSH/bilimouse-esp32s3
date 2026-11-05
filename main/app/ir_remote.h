@@ -10,7 +10,7 @@
  * 重启、断电、重新烧录固件都不会丢；只有 `idf.py erase-flash` 或者
  * 故意去改 partitions.csv 里 nvs / irbank 的 offset 才会丢。
  *
- * 槽位：4 个，用屏上的「切换」按钮选择当前槽；当前槽号也会记住。
+ * 槽位：10 个，用屏上的「切换」按钮选择当前槽；当前槽号也会记住。
  */
 #pragma once
 
@@ -23,7 +23,10 @@
 extern "C" {
 #endif
 
-#define IR_SLOT_COUNT 4
+#define IR_SLOT_COUNT 10
+
+/** v1 旧格式的槽位数（仅迁移用，固定 4 个，别改） */
+#define IR_SLOT_V1_COUNT 4
 
 /** 初始化：初始化 RMT + 从 NVS 载入已学码 */
 esp_err_t ir_remote_init(void);

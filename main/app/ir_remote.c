@@ -51,7 +51,7 @@ typedef struct {
     ir_slot_t slots[IR_SLOT_COUNT];
 } ir_bank_t;
 
-/* ---- 老格式（v2.0 之前）---- */
+/* ---- 老格式（v2.0 / v2.1 早期，固定 4 槽）---- */
 typedef struct {
     uint16_t count;
     rmt_symbol_word_t syms[BSP_IR_MAX_SYMBOLS];
@@ -59,12 +59,22 @@ typedef struct {
 
 typedef struct {
     uint32_t     magic;
-    ir_slot_v1_t slots[IR_SLOT_COUNT];
+    ir_slot_v1_t slots[IR_SLOT_V1_COUNT];
 } ir_bank_v1_t;
 
+/* ---- v2 的 4 槽版本（扩到 10 槽之前），升级后要把旧码搬进来 ---- */
+typedef struct {
+    uint32_t  magic;
+    uint16_t  version;
+    uint16_t  slot_count;
+    uint32_t  seq;
+    ir_slot_t slots[IR_SLOT_V1_COUNT];
+} ir_bank_v2_l4_t;
+
 static ir_bank_t s_bank;
-static ir_bank_t s_tmp_a;       /* 放静态区：两份 bank 加起来 3KB，别塞栈 */
+static ir_bank_t s_tmp_a;       /* 放静态区：两份 bank 合计 ~8KB，别塞栈 */
 static ir_bank_t s_tmp_b;
+static ir_bank_v2_l4_t s_tmp_v2;
 static uint8_t   s_active;
 static bool      s_ready;
 
@@ -130,7 +140,7 @@ static bool migrate_v1(ir_bank_t *out)
     }
 
     bank_reset(out);
-    for (int i = 0; i < IR_SLOT_COUNT; i++) {
+    for (int i = 0; i < IR_SLOT_V1_COUNT; i++) {
         uint16_t n = v1.slots[i].count;
         if (n > BSP_IR_MAX_SYMBOLS) {
             n = BSP_IR_MAX_SYMBOLS;
@@ -143,6 +153,47 @@ static bool migrate_v1(ir_bank_t *out)
     }
     ESP_LOGI(TAG, "migrated %u slot(s) from v1 format",
              (unsigned)ir_remote_loaded_count());
+    return true;
+}
+
+/**
+ * 从「v2 的 4 槽版本」升级：槽位从 4 扩到 10 后，记录整体变大，
+ * 旧 blob 因长度不匹配会被上面的加载器当作无效。这里把旧 4 槽码
+ * 原样搬进新 bank 的前 4 个槽，一次迁移后立刻用新格式重写两份副本。
+ */
+static bool migrate_v2_l4(ir_bank_t *out)
+{
+    /* 先试分区镜像，再试 NVS */
+    size_t len = 0;
+    uint32_t seq = 0;
+    bool from_raw = (ir_store_load(&s_tmp_v2, sizeof(s_tmp_v2), &len, &seq) == ESP_OK &&
+                     len == sizeof(s_tmp_v2));
+
+    if (!from_raw) {
+        nvs_handle_t h;
+        if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+            return false;
+        }
+        len = sizeof(s_tmp_v2);
+        esp_err_t err = nvs_get_blob(h, NVS_KEY_IR, &s_tmp_v2, &len);
+        nvs_close(h);
+        if (err != ESP_OK || len != sizeof(s_tmp_v2)) {
+            return false;
+        }
+    }
+
+    if (s_tmp_v2.magic != IR_BANK_MAGIC || s_tmp_v2.version != IR_BANK_VERSION ||
+        s_tmp_v2.slot_count != IR_SLOT_V1_COUNT) {
+        return false;
+    }
+
+    bank_reset(out);
+    out->seq = s_tmp_v2.seq;
+    for (int i = 0; i < IR_SLOT_V1_COUNT; i++) {
+        out->slots[i] = s_tmp_v2.slots[i];
+    }
+    ESP_LOGI(TAG, "migrated 4-slot v2 bank (seq %u) to %u slots",
+             (unsigned)s_tmp_v2.seq, (unsigned)IR_SLOT_COUNT);
     return true;
 }
 
@@ -232,9 +283,10 @@ static esp_err_t bank_load(void)
         ESP_LOGW(TAG, "flash mirror missing - rebuilding it from nvs (%u slots)",
                  (unsigned)ir_remote_loaded_count());
         ir_store_save(&s_bank, sizeof(s_bank), s_bank.seq);
-    } else if (migrate_v1(&s_bank)) {
-        /* 老固件升上来的：把迁移结果落到两份新存档里 */
-        ESP_LOGI(TAG, "migrated to v2 storage, writing both copies");
+    } else if (migrate_v2_l4(&s_bank) || migrate_v1(&s_bank)) {
+        /* 4 槽 v2 或更老的 v1 升上来的：把迁移结果落到两份新存档里 */
+        ESP_LOGI(TAG, "migrated to %u-slot storage, writing both copies",
+                 (unsigned)IR_SLOT_COUNT);
         bank_save();
     } else {
         ESP_LOGI(TAG, "no ir codes stored yet");

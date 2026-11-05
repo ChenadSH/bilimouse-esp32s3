@@ -83,16 +83,17 @@ static const btn_def_t s_sub_btns[] = {
  * 按键是「按住型」：手指按下立即发 mouse down，抬起才发 up，
  * 所以按住后往中间拖就是拖拽/框选，和真实鼠标一致。
  * 两侧留 58px，手指粗也能按准；中间 196px 宽足够划动指针。
+ * 高度只到内容区为止（FOOTER_Y 上方留 8px），不压到底部。
  */
 #define MOUSE_BTN_W   58
 #define MOUSE_BTN_Y   30
-#define MOUSE_BTN_H   200
+#define MOUSE_BTN_H   (FOOTER_Y - 8 - MOUSE_BTN_Y)   /* 30..210，footer 在 218 */
 
 static const btn_def_t s_mouse_btns[] = {
     { UI_BTN_MOUSE_LEFT,   4,                    MOUSE_BTN_Y, MOUSE_BTN_W, MOUSE_BTN_H, "左键", COL_ACCENT },
     { UI_BTN_MOUSE_RIGHT,  SCR_W - 4 - MOUSE_BTN_W, MOUSE_BTN_Y, MOUSE_BTN_W, MOUSE_BTN_H, "右键", COL_ACCENT },
     /* 返回遥控的出口：必须留着，否则进了鼠标模式就点不到别的按钮 */
-    { UI_BTN_MOUSE_MODE,   132,                  188,          56,           44,          "遥控", COL_SUBTEXT },
+    { UI_BTN_MOUSE_MODE,   132,                  160,          56,           44,          "遥控", COL_SUBTEXT },
 };
 
 #define MOUSE_BTN_CNT (sizeof(s_mouse_btns) / sizeof(s_mouse_btns[0]))
