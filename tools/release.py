@@ -32,6 +32,8 @@ ROOT = Path(__file__).resolve().parent.parent
 BIN = ROOT / "build" / "bilimouse.bin"
 CMAKELISTS = ROOT / "CMakeLists.txt"
 LATEST = f"https://github.com/{REPO}/releases/latest/download"
+RAW_MASTER = f"https://raw.githubusercontent.com/{REPO}/master"
+OTA_DIR = ROOT / "ota"
 
 
 def run(cmd, **kw):
@@ -99,7 +101,26 @@ def main():
         sys.exit("error: build/bilimouse.bin 不存在")
     print(f"bin ok: {BIN.stat().st_size} bytes")
 
-    # 4. 创建 release（tag 自动打在远端 master HEAD）
+    # 3.5 资产双通道：
+    #   GitHub Releases 的 CDN（Azure Front Door）对 ESP-IDF 的 TLS 指纹有
+    #   bot 防护，会间歇/持续返回 618 + XHTML 拒绝页（PC curl 却是 200），
+    #   设备根本拉不到。而 raw.githubusercontent.com（radio 台列表同源）
+    #   实测对设备永远畅通。所以 manifest + bin 同时提交进仓库 ota/ 目录，
+    #   manifest.url 指向 tag 化的 raw bin 路径（内容不可变，无缓存歧义）。
+    OTA_DIR.mkdir(exist_ok=True)
+    manifest = {
+        "version": ver,
+        "url": f"https://raw.githubusercontent.com/{REPO}/v{ver}/ota/bilimouse.bin",
+        "notes": notes[:90],
+        "size": BIN.stat().st_size,
+    }
+    (OTA_DIR / "manifest.json").write_bytes(json.dumps(manifest).encode())
+    (OTA_DIR / "bilimouse.bin").write_bytes(BIN.read_bytes())
+    run(["git", "add", "ota"])
+    subprocess.run(["git", "commit", "-m", f"ota assets: v{ver}"], cwd=ROOT)
+    run(["git", "push", "origin", "master"])
+
+    # 4. 创建 release（tag 自动打在远端 master HEAD，已含 ota/ 资产）
     rel = api("POST", f"https://api.github.com/repos/{REPO}/releases", token, {
         "tag_name": f"v{ver}",
         "target_commitish": "master",
@@ -109,22 +130,20 @@ def main():
     rid = rel["id"]
     print(f"release created: {rel['html_url']}")
 
-    # 5. 上传 manifest.json + bilimouse.bin
-    manifest = json.dumps({
-        "version": ver,
-        "url": f"{LATEST}/bilimouse.bin",
-        "notes": notes[:90],
-        "size": BIN.stat().st_size,   # 固件端检查更新时先显示包大小
-    }).encode()
+    # 5. 上传 manifest.json + bilimouse.bin（Releases 通道，人下载用；
+    #    设备 OTA 走 raw 通道，见 3.5）
+    rel_manifest = dict(manifest)
+    rel_manifest["url"] = f"{LATEST}/bilimouse.bin"
     api("POST",
         f"https://uploads.github.com/repos/{REPO}/releases/{rid}/assets?name=manifest.json",
-        token, raw=manifest, ctype="application/json")
+        token, raw=json.dumps(rel_manifest).encode(), ctype="application/json")
     api("POST",
         f"https://uploads.github.com/repos/{REPO}/releases/{rid}/assets?name=bilimouse.bin",
         token, raw=BIN.read_bytes(), ctype="application/octet-stream")
     print("assets uploaded: manifest.json, bilimouse.bin")
 
-    print(f"\ndone. 设备 OTA 地址(固定): {LATEST}/manifest.json")
+    print(f"\ndone. 设备 OTA 地址(固定/raw 通道): {RAW_MASTER}/ota/manifest.json")
+    print(f"      bin 资产地址: {manifest['url']}")
 
 
 if __name__ == "__main__":
