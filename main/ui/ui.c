@@ -794,7 +794,20 @@ static void redraw(void)
         draw_footer();
     }
 
-    esp_lcd_panel_draw_bitmap(s_lcd.panel, 0, 0, SCR_W, SCR_H, s_buf);
+    /* ⚠️ 必须分条刷新，不能一次 draw_bitmap 整帧：
+       esp_lcd 把 PSRAM 帧缓冲交给 SPI DMA 时，spicommon 会为每次传输
+       临时 malloc 一块**内部**对齐缓冲（PSRAM 指针不满足 cache 对齐就
+       得先拷一份）。整帧 320*240*2=150KB，运行期内部 RAM 只剩几 KB，
+       分配必然失败 —— 串口刷屏 "spicommon_dma_setup_priv_buffer
+       Failed to allocate priv TX buffer"，屏幕上画面停住不动。
+       每条 4 行 = 320*4*2 = 2560 字节，能塞进当前最大的 4KB 内部块；
+       整帧 60 条，SPI 80MHz 下总耗时只有几毫秒量级。 */
+    #define FLUSH_ROWS 4
+    for (int y = 0; y < SCR_H; y += FLUSH_ROWS) {
+        int h = (y + FLUSH_ROWS <= SCR_H) ? FLUSH_ROWS : (SCR_H - y);
+        esp_lcd_panel_draw_bitmap(s_lcd.panel, 0, y, SCR_W, y + h,
+                                  s_buf + (size_t)y * SCR_W);
+    }
     s_dirty = false;
 }
 

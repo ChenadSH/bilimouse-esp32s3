@@ -781,11 +781,6 @@ void app_main(void)
         ui_set_footer("正在启动");
         /* 背光统一由 power_mgr 管理（读设置里的亮度 + 空闲自动变暗） */
         power_mgr_init();
-        /* ⚠️ 立刻强制刷一帧：SPI DMA 的 priv TX buffer 在**第一次传输**时
-           才分配，而 WiFi(~45KB)+蓝牙(~60KB) 初始化完内部 RAM 只剩零头，
-           第一帧分配失败会导致屏幕永远刷不出来（只有报错）。
-           趁现在内存充裕先把这块 DMA 缓冲占住，之后一直复用。 */
-        ui_flush();
     }
 
     err = bsp_button_init();
