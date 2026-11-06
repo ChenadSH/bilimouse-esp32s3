@@ -25,6 +25,7 @@
 #include "freertos/task.h"
 #include "nvs.h"
 
+#include "hid_device.h"
 #include "power_mgr.h"
 #include "sdkconfig.h"
 #include "ui.h"
@@ -249,22 +250,36 @@ static esp_err_t http_resolve_url(const char *url_in, char *out, size_t outlen)
         }
         esp_http_client_fetch_headers(c);
         int code = esp_http_client_get_status_code(c);
-        char loc[512] = {0};
-        char *p = NULL;
-        if (esp_http_client_get_header(c, "Location", &p) == ESP_OK && p) {
-            strlcpy(loc, p, sizeof(loc));
+        bool redirect = (code == 301 || code == 302 || code == 303 ||
+                         code == 307 || code == 308);
+        if (!redirect) {
+            esp_http_client_close(c);
+            esp_http_client_cleanup(c);
+            break;
+        }
+        /* ⚠️ 不能用 esp_http_client_get_header("Location")：
+           那个 API 读的是**请求头**，响应头默认根本不保存
+           （CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS 默认关），
+           所以 Location 永远查不到、链就断在第一跳。
+           响应解析阶段 Location 已经存进 client->location，
+           set_redirection 内部就是 set_url(client->location)。 */
+        esp_err_t red = esp_http_client_set_redirection(c);
+        if (red == ESP_OK) {
+            char newurl[512] = {0};
+            if (esp_http_client_get_url(c, newurl, sizeof(newurl)) == ESP_OK &&
+                newurl[0]) {
+                strlcpy(url, newurl, sizeof(url));
+            } else {
+                red = ESP_FAIL;
+            }
         }
         esp_http_client_close(c);
         esp_http_client_cleanup(c);
-
-        bool redirect = (code == 301 || code == 302 || code == 303 ||
-                         code == 307 || code == 308) && loc[0];
-        if (!redirect) {
-            break;
+        if (red != ESP_OK) {
+            return red;
         }
-        ESP_LOGI(TAG, "follow redirect %d -> %.60s%s", code, loc,
-                 strlen(loc) > 60 ? "…" : "");
-        strlcpy(url, loc, sizeof(url));
+        ESP_LOGI(TAG, "follow redirect %d -> %.60s%s", code, url,
+                 strlen(url) > 60 ? "…" : "");
     }
     strlcpy(out, url, outlen);
     return ESP_OK;
@@ -359,11 +374,18 @@ static esp_err_t manifest_fetch(ota_manifest_t *m)
     }
     esp_http_client_cleanup(cli);
 
-    if (code != 200 || total <= 0) {
+    if (total <= 0) {
         ESP_LOGW(TAG, "manifest http %d, %d bytes (%s)", code, total, url);
         return ESP_ERR_NOT_FOUND;
     }
     body[total] = '\0';
+    if (code != 200) {
+        /* 实测 GitHub release-assets（Azure CDN）对 ESP32 的请求返回过
+           618 这种非标准状态码，但 body 完整可用；curl 走 PC 却是 200。
+           所以这里只警告，成败交给下面的字段解析判断。 */
+        ESP_LOGW(TAG, "manifest http %d (non-200), %d bytes", code, total);
+        ESP_LOGI(TAG, "manifest body head: %.120s", body);
+    }
 
     /* 只提取三个字符串字段，手写扫描比引 cJSON 少一层依赖：
        manifest 是我们自己发布的，格式固定，没必要上完整 JSON 解析器。 */
@@ -605,10 +627,35 @@ static void ota_download_run(void)
 
 /* ==================== 任务入口（防重入） ==================== */
 
+/**
+ * BLE 恢复前先把 WiFi 断开。
+ *
+ * 连接态的动态收发缓冲（rx/tx、TCP 窗口）会把刚还给堆的 BLE 内存
+ * 重新吃掉并切碎，Bluedroid 重启时连一个小信号量都分不出来
+ * （future_new unable to allocate -> assert 崩溃重启，实测踩过）。
+ * 断开后回到与开机等价的内存条件（开机时 WiFi init+蓝牙 init 能共存）。
+ * 恢复成功后由调用方决定是否把 WiFi 重新连上（电台要用网）。
+ */
+static void wifi_drop_for_ble(void)
+{
+    if (s_wifi_got_ip) {
+        ESP_LOGI(TAG, "dropping wifi before BLE resume");
+        esp_wifi_disconnect();
+        vTaskDelay(pdMS_TO_TICKS(600));   /* 等事件任务把动态缓冲放回堆 */
+    }
+}
+
 static void check_task(void *arg)
 {
     (void)arg;
     ota_check_run(false);
+    /* 没有发现新版本（已是最新 / 失败）就把蓝牙拉回来；
+       发现有新版本（READY）则保持关闭，等下载/升级完重启。 */
+    if (s_state.phase != OTA_PHASE_READY) {
+        wifi_drop_for_ble();
+        hid_ble_resume();
+        wifi_ensure_connected();   /* 电台还要用网；失败也不影响下次重试 */
+    }
     s_task_busy = false;
     vTaskDelete(NULL);
 }
@@ -617,6 +664,12 @@ static void download_task(void *arg)
 {
     (void)arg;
     ota_download_run();
+    /* 成功路径会走倒数重启，到不了这里；失败则恢复蓝牙 */
+    if (s_state.phase == OTA_PHASE_FAIL) {
+        wifi_drop_for_ble();
+        hid_ble_resume();
+        wifi_ensure_connected();
+    }
     s_task_busy = false;
     vTaskDelete(NULL);
 }
@@ -644,9 +697,14 @@ void ota_update_check(void)
     ui_mark_dirty();
     power_mgr_notify_activity();
 
+    /* 蓝牙先整个关掉：BLE 常驻约 60~80KB 内部 RAM，OTA 的 9KB 任务栈
+       在蓝牙在场时根本分不出来（check task create failed 的根因）。 */
+    hid_ble_suspend();
+
     s_task_busy = true;
     if (xTaskCreate(check_task, "ota_chk", OTA_TASK_STACK, NULL, 3, NULL) != pdPASS) {
         s_task_busy = false;
+        hid_ble_resume();
         s_state.phase = OTA_PHASE_FAIL;
         strlcpy(s_state.wifi_info, "内存不足，任务起不来", sizeof(s_state.wifi_info));
         ESP_LOGE(TAG, "check task create failed, free heap=%u",
@@ -669,6 +727,7 @@ void ota_update_download(void)
         return;
     }
     s_task_busy = true;
+    hid_ble_suspend();   /* 与检查流程同理：下载安装前关蓝牙腾内存 */
     /* 同样先给屏幕一个即时反馈（进度条 0%），再起后台任务 */
     s_state.percent = 0;
     s_state.done_kb = 0;
@@ -676,6 +735,7 @@ void ota_update_download(void)
     ui_mark_dirty();
     if (xTaskCreate(download_task, "ota_dl", OTA_TASK_STACK, NULL, 3, NULL) != pdPASS) {
         s_task_busy = false;
+        hid_ble_resume();
         s_state.phase = OTA_PHASE_FAIL;
         ESP_LOGE(TAG, "download task create failed, free heap=%u",
                  (unsigned)esp_get_free_heap_size());
@@ -692,9 +752,19 @@ static void auto_check_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(AUTO_CHECK_DELAY_S * 1000));
     /* 自动流程不弹错误提示（WiFi 没配好就静默跳过），只在
        确认发现新版本时才打扰用户：查到 READY 就直接继续下载。 */
+    hid_ble_suspend();   /* 同样先腾内存（期间 HID 短暂不可用，几十秒内恢复） */
     ota_check_run(true);
     if (s_state.phase == OTA_PHASE_READY) {
         ota_download_run();
+        if (s_state.phase == OTA_PHASE_FAIL) {
+            wifi_drop_for_ble();
+            hid_ble_resume();
+            wifi_ensure_connected();
+        }
+    } else {
+        wifi_drop_for_ble();
+        hid_ble_resume();
+        wifi_ensure_connected();
     }
     vTaskDelete(NULL);
 }

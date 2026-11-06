@@ -781,6 +781,11 @@ void app_main(void)
         ui_set_footer("正在启动");
         /* 背光统一由 power_mgr 管理（读设置里的亮度 + 空闲自动变暗） */
         power_mgr_init();
+        /* ⚠️ 立刻强制刷一帧：SPI DMA 的 priv TX buffer 在**第一次传输**时
+           才分配，而 WiFi(~45KB)+蓝牙(~60KB) 初始化完内部 RAM 只剩零头，
+           第一帧分配失败会导致屏幕永远刷不出来（只有报错）。
+           趁现在内存充裕先把这块 DMA 缓冲占住，之后一直复用。 */
+        ui_flush();
     }
 
     err = bsp_button_init();
@@ -804,6 +809,21 @@ void app_main(void)
         ESP_LOGW(TAG, "ir init failed (红外功能不可用)");
     }
 
+    /* 串口命令行：红外码备份 + WiFi/OTA 配置（idf.py monitor 里敲 ir/wifi/ota）。
+       必须在 WiFi/蓝牙初始化之前创建 —— REPL 自己要 4KB 内部任务栈，
+       WiFi(~45KB) + 蓝牙(~60KB) 起来后内部 RAM 只剩零头，REPL 任务
+       会分配不出来（串口命令行是设备变砖时唯一的自救通道，不能丢）。
+       wifi/ota 命令在 REPL 跑起来之后才注册，运行中注册是安全的。 */
+    cli_start();
+
+    /* WiFi 初始化必须在蓝牙之前：esp_wifi 的 esf_buf 静态缓冲要一大块
+       连续内部 RAM，蓝牙控制器起来后内部 RAM 被切成碎片，WiFi 初始化
+       会随机性失败（esf_buf alloc eb fail -> NO_MEM）—— 之前「电台/OTA
+       全都时好时坏」的元凶。这里只 init+start 不连接，真正连接在需要时发生。 */
+    if (ota_update_init() != ESP_OK) {
+        ESP_LOGW(TAG, "ota init failed (在线升级不可用)");
+    }
+
     err = hid_device_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "hid init failed: %s", esp_err_to_name(err));
@@ -819,16 +839,9 @@ void app_main(void)
     xTaskCreate(hid_monitor_task, "hid_task", 3072, NULL, 4, NULL);
     power_mgr_start();
 
-    /* 串口命令行：红外码备份 + WiFi/OTA 配置（idf.py monitor 里敲 ir/wifi/ota） */
-    cli_start();
-
-    /* WiFi + OTA（失败不影响其它功能，只是「升级」按钮不可用）。
-       esp_netif_init 在这里完成 lwip 初始化；任何依赖网络栈的模块
-       （如电台）都必须在它之后启动，否则 socket() 会触发
-       tcpip_send_msg_wait_sem "Invalid mbox" 断言 -> 开机重启循环。 */
-    if (ota_update_init() != ESP_OK) {
-        ESP_LOGW(TAG, "ota init failed (在线升级不可用)");
-    }
+    /* WiFi + OTA 的 esp_netif_init 已提前到蓝牙之前（见上）：
+       任何依赖网络栈的模块（如电台）都在它之后启动，socket() 不会再
+       触发 tcpip "Invalid mbox" 断言。 */
 
     /* 走到这里 = 外设、蓝牙、UI 全部就绪：如果本次启动是 OTA 升级后的
        第一次启动（PENDING_VERIFY 状态），确认新固件有效。

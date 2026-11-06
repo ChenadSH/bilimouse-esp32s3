@@ -30,6 +30,12 @@ typedef enum {
 /** 初始化蓝牙控制器 + HID profile，开始广播 */
 esp_err_t hid_device_init(void);
 
+/** 临时关掉整个 BLE 协议栈，把内部 RAM 还给堆（OTA 检查/下载前调用） */
+void hid_ble_suspend(void);
+
+/** 重新拉起 BLE 协议栈（OTA 结束且不需要重启时调用） */
+esp_err_t hid_ble_resume(void);
+
 /** 当前连接状态 */
 hid_conn_state_t hid_device_state(void);
 

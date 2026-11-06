@@ -79,12 +79,17 @@ esp_err_t esp_hidd_profile_deinit(void)
     if(hidd_svc_hdl != 0) {
 	esp_ble_gatts_stop_service(hidd_svc_hdl);
 	esp_ble_gatts_delete_service(hidd_svc_hdl);
-    } else {
-	return ESP_FAIL;
-   }
+    }
 
-    /* register the HID device profile to the BTA_GATTS module*/
-    esp_ble_gatts_app_unregister(hidd_le_env.gatt_if);
+    if (hidd_le_env.gatt_if != 0) {
+        /* register the HID device profile to the BTA_GATTS module*/
+        esp_ble_gatts_app_unregister(hidd_le_env.gatt_if);
+    }
+
+    /* ⚠️ 官方 demo 漏了这一句：不清 enabled 标志的话，
+       下次 esp_hidd_profile_init() 会报 "already initialized" 直接失败
+       （OTA 挂起/恢复蓝牙时二次 init 必踩）。 */
+    hidd_le_env.enabled = false;
 
     return ESP_OK;
 }

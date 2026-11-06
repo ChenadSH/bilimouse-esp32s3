@@ -56,6 +56,7 @@ static bool     s_adv_active = false;     /* 广播是否真的在跑（GAP 事�
 static uint32_t s_adv_last_try_ms = 0;
 static bool     s_pair_failed = false;    /* 最近一次配对失败（供 UI 提示） */
 static uint8_t  s_auth_fail = 0;          /* 连续配对失败次数 */
+static bool     s_ble_down = false;       /* BLE 协议栈已被挂起（OTA 期间） */
 
 /* ================= 广播数据 ================= */
 /*
@@ -282,6 +283,8 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
     }
 }
 
+static esp_err_t ble_stack_start(void);
+
 esp_err_t hid_device_init(void)
 {
     esp_err_t ret;
@@ -295,6 +298,17 @@ esp_err_t hid_device_init(void)
 
     /* 仅启用 BLE，释放经典蓝牙内存 */
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
+
+    return ble_stack_start();
+}
+
+/**
+ * BLE 协议栈整体启动（控制器 + Bluedroid + HID profile + 配对参数）。
+ * 抽成独立函数：OTA 检查期间要先关掉蓝牙腾内存，结束后原样拉起来。
+ */
+static esp_err_t ble_stack_start(void)
+{
+    esp_err_t ret;
 
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ret = esp_bt_controller_init(&bt_cfg);
@@ -412,6 +426,52 @@ void hid_device_clear_bonds(void)
     free(list);
 }
 
+/* ================= OTA 期间的蓝牙挂起/恢复 =================
+ * 内部 RAM 极度紧张：BLE（控制器 + Bluedroid 主机）常驻约 60~80KB，
+ * 而 OTA 检查/下载需要 9KB 任务栈 + TLS 缓冲 + LWIP 收发缓冲，
+ * 双方同时在场时 9KB 栈都分不出来（mem 显示 free 不足 15KB）。
+ * OTA 流程先把蓝牙整个关掉 —— deinit 会把内存还给堆 —— 结束后再拉起。
+ */
+void hid_ble_suspend(void)
+{
+    if (s_ble_down) {
+        return;
+    }
+    s_ble_down = true;
+    s_connected = false;
+    s_secure = false;
+    s_report_enabled = false;
+    s_state = HID_STATE_IDLE;
+    s_adv_active = false;
+
+    /* 先在 Bluedroid 还活着时注销 HID profile（GATT app unregister）。
+       不做这一步，resume 时 esp_hidd_profile_init 会报
+       "HID device profile already initialized"（内部静态标志没清），
+       整个 resume 被判失败、广播永远起不来。 */
+    esp_hidd_profile_deinit();
+    esp_bluedroid_disable();
+    esp_bluedroid_deinit();
+    esp_bt_controller_disable();
+    esp_bt_controller_deinit();
+    ESP_LOGW(TAG, "BLE suspended for OTA (heap returned)");
+}
+
+esp_err_t hid_ble_resume(void)
+{
+    if (!s_ble_down) {
+        return ESP_OK;
+    }
+    esp_err_t err = ble_stack_start();
+    if (err != ESP_OK) {
+        s_ble_down = true;
+        ESP_LOGE(TAG, "BLE resume failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    s_ble_down = false;
+    ESP_LOGI(TAG, "BLE resumed");
+    return ESP_OK;
+}
+
 /**
  * 是否可以发送 HID 报告。
  *
@@ -425,7 +485,7 @@ void hid_device_clear_bonds(void)
  */
 bool hid_device_is_ready(void)
 {
-    return s_connected && s_secure && s_report_enabled;
+    return !s_ble_down && s_connected && s_secure && s_report_enabled;
 }
 
 /** 主机是否已订阅输入报告（用于屏幕上的诊断提示） */
@@ -447,6 +507,9 @@ void hid_device_service(void)
 {
     uint32_t now = now_ms();
 
+    if (s_ble_down) {
+        return;   /* OTA 期间协议栈已关，广播看门狗不要去碰 GAP API */
+    }
     if (!s_connected && !s_adv_active && (now - s_adv_last_try_ms) > 3000) {
         ESP_LOGW(TAG, "advertising is not running, restarting");
         start_advertising();

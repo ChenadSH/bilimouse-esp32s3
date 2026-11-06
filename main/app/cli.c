@@ -29,12 +29,15 @@ static int cmd_mem(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    multi_heap_info_t in, ps;
+    multi_heap_info_t in, ps, dma;
     heap_caps_get_info(&in, MALLOC_CAP_INTERNAL);
     heap_caps_get_info(&ps, MALLOC_CAP_SPIRAM);
+    heap_caps_get_info(&dma, MALLOC_CAP_DMA);
     printf("internal: free=%u largest=%u allocated=%u\n",
            (unsigned)in.total_free_bytes, (unsigned)in.largest_free_block,
            (unsigned)in.total_allocated_bytes);
+    printf("dma     : free=%u largest=%u\n",
+           (unsigned)dma.total_free_bytes, (unsigned)dma.largest_free_block);
     printf("psram   : free=%u largest=%u\n",
            (unsigned)ps.total_free_bytes, (unsigned)ps.largest_free_block);
     return 0;
