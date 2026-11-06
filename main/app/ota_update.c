@@ -329,21 +329,9 @@ static int semver_cmp(const char *a, const char *b)
     return 0;
 }
 
-/** HTTP GET manifest 并解析 JSON。失败返回错误码。 */
-static esp_err_t manifest_fetch(ota_manifest_t *m)
+/* 单次抓取 manifest 并解析 JSON（不含 URL 解析与重试）。 */
+static esp_err_t manifest_fetch_once(ota_manifest_t *m, const char *url)
 {
-    char url[512];
-    if (!manifest_url_get(url, sizeof(url))) {
-        ESP_LOGW(TAG, "manifest url empty (serial: 'ota url <http://...>')");
-        return ESP_ERR_INVALID_STATE;
-    }
-    /* latest 固定链接是 302 链，先解析出真实的资产地址 */
-    esp_err_t e = http_resolve_url(url, url, sizeof(url));
-    if (e != ESP_OK) {
-        ESP_LOGW(TAG, "resolve manifest url failed: %s", esp_err_to_name(e));
-        return e;
-    }
-
     esp_http_client_config_t cfg = {
         .url = url,
         .timeout_ms = 10000,
@@ -416,6 +404,42 @@ static esp_err_t manifest_fetch(ota_manifest_t *m)
     return ESP_OK;
 }
 
+/**
+ * manifest 获取（含重试）。
+ *
+ * GitHub 资产走 Azure Front Door CDN，它对 ESP-IDF 的 TLS 指纹有 bot
+ * 防护，会**间歇性**返回 618 + XHTML 拒绝页（同一台设备，PC curl 是
+ * 200）。不是每次都拒 —— 实测同一固件连跑几次，有的请求能拿到真
+ * manifest。所以解析失败就整体重试，重试时 302 签名 URL 要重新解析。
+ */
+static esp_err_t manifest_fetch(ota_manifest_t *m)
+{
+    char url[512];
+    if (!manifest_url_get(url, sizeof(url))) {
+        ESP_LOGW(TAG, "manifest url empty (serial: 'ota url <http://...>')");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t e = ESP_FAIL;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        char resolved[512];
+        strlcpy(resolved, url, sizeof(resolved));
+        e = http_resolve_url(resolved, resolved, sizeof(resolved));
+        if (e == ESP_OK) {
+            e = manifest_fetch_once(m, resolved);
+        } else {
+            ESP_LOGW(TAG, "resolve manifest url failed: %s", esp_err_to_name(e));
+        }
+        if (e == ESP_OK) {
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "manifest attempt %d/3 failed: %s", attempt,
+                 esp_err_to_name(e));
+        vTaskDelay(pdMS_TO_TICKS(1500));
+    }
+    return e;
+}
+
 /* ==================== 状态快照（UI 分步显示用） ==================== */
 
 /* UI 读这份快照刷新升级页。WiFi 阶段电台等模块也会触发写，无害。 */
@@ -469,44 +493,60 @@ static esp_err_t ota_perform(void)
     s_state.phase = OTA_PHASE_DOWNLOAD;
     s_state.percent = -1;
     ui_mark_dirty();
-    esp_err_t err = esp_https_ota_begin(&ota_cfg, &h);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "ota begin failed: %s", esp_err_to_name(err));
-        s_state.phase = OTA_PHASE_FAIL;
-        return err;
-    }
-    /* manifest 没带 size 时，这里能拿到镜像真实大小 */
-    int img_total = esp_https_ota_get_image_size(h);
-    if (img_total > 0) {
-        s_state.total_kb = img_total / 1024;
-    }
 
-    esp_app_desc_t desc;
-    while ((err = esp_https_ota_perform(h)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
-        if (esp_https_ota_get_image_len_read(h) >= (int)sizeof(esp_image_header_t) + (int)sizeof(esp_image_segment_header_t) &&
-            esp_https_ota_get_img_desc(h, &desc) == ESP_OK) {
-            ESP_LOGI(TAG, "remote image version: %s", desc.version);
+    /* bin 下载同样可能被 CDN 的 bot 防护间歇性拒绝（618），失败重试 3 次。
+       begin 阶段就会做状态码检查（非 200 直接报错），中途断流则整体重来。 */
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        h = NULL;
+        err = esp_https_ota_begin(&ota_cfg, &h);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "ota begin failed (attempt %d/3): %s", attempt,
+                     esp_err_to_name(err));
+            vTaskDelay(pdMS_TO_TICKS(1500));
+            continue;
         }
-        int total = esp_https_ota_get_image_size(h);
-        int read = esp_https_ota_get_image_len_read(h);
-        s_state.total_kb = total / 1024;
-        s_state.done_kb = read / 1024;
-        if (total > 0) {
-            s_state.percent = read * 100 / total;
+        /* manifest 没带 size 时，这里能拿到镜像真实大小 */
+        int img_total = esp_https_ota_get_image_size(h);
+        if (img_total > 0) {
+            s_state.total_kb = img_total / 1024;
         }
-        power_mgr_notify_activity();   /* 别让屏幕在升级途中睡着 */
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "ota download failed: %s", esp_err_to_name(err));
-        esp_https_ota_abort(h);
-        s_state.phase = OTA_PHASE_FAIL;
-        return err;
-    }
 
-    err = esp_https_ota_finish(h);   /* 内部已做镜像校验 + set_boot_partition */
+        esp_app_desc_t desc;
+        while ((err = esp_https_ota_perform(h)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+            if (esp_https_ota_get_image_len_read(h) >= (int)sizeof(esp_image_header_t) + (int)sizeof(esp_image_segment_header_t) &&
+                esp_https_ota_get_img_desc(h, &desc) == ESP_OK) {
+                ESP_LOGI(TAG, "remote image version: %s", desc.version);
+            }
+            int total = esp_https_ota_get_image_size(h);
+            int read = esp_https_ota_get_image_len_read(h);
+            s_state.total_kb = total / 1024;
+            s_state.done_kb = read / 1024;
+            if (total > 0) {
+                s_state.percent = read * 100 / total;
+            }
+            power_mgr_notify_activity();   /* 别让屏幕在升级途中睡着 */
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "ota download failed (attempt %d/3): %s", attempt,
+                     esp_err_to_name(err));
+            esp_https_ota_abort(h);
+            vTaskDelay(pdMS_TO_TICKS(1500));
+            continue;
+        }
+
+        err = esp_https_ota_finish(h);   /* 内部已做镜像校验 + set_boot_partition */
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "ota finish failed (attempt %d/3): %s", attempt,
+                     esp_err_to_name(err));
+            vTaskDelay(pdMS_TO_TICKS(1500));
+            continue;
+        }
+        break;
+    }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "ota finish failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "ota failed after retries: %s", esp_err_to_name(err));
         s_state.phase = OTA_PHASE_FAIL;
         return err;
     }
