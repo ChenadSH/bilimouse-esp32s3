@@ -2,9 +2,14 @@
  * @file ui.h
  * @brief BiliMouse 屏幕 UI（自研轻量渲染器，零外部依赖）
  *
+ * 页面结构（v2.6）：
+ *   首页 = emoji icon 左右滑动轮播，点 icon 进入功能页；
+ *   每个功能页只放本功能自己的按钮，跨页跳转全部走左上角「<」回首页，
+ *   不再有「页面里塞满其它功能的入口」的旧布局。
+ *
  * 设计目标：
  *   1. 2.0 寸 IPS 屏是用户躺着时唯一的状态信息来源
- *   2. 触摸目标必须够大 —— 躺着单手戳，手指精度低，最小 70x56 像素
+ *   2. 触摸目标必须够大 —— 躺着单手戳，手指精度低
  *   3. 屏幕本身即触控板：空白处拖动 = 移动鼠标指针
  */
 #pragma once
@@ -22,30 +27,28 @@ extern "C" {
 typedef enum {
     UI_CONN_DISCONNECTED = 0,  /* 未连接 */
     UI_CONN_PAIRING,           /* 配对中 */
-    UI_CONN_CONNECTED,        /* 已连接 */
+    UI_CONN_CONNECTED,         /* 已连接 */
 } ui_conn_state_t;
 
 /** 运行模式 */
 typedef enum {
-    UI_MODE_HOME = 0,     /* 首页：icon 左右滑动切换 */
-    UI_MODE_REMOTE,       /* B站控制页 */
+    UI_MODE_HOME = 0,     /* 首页：emoji icon 左右滑动切换 */
+    UI_MODE_REMOTE,       /* B站播放控制页 */
     UI_MODE_MOUSE,        /* 鼠标模式（左右键按钮 + 中间触控板） */
     UI_MODE_CALIBRATE,    /* 校准模式 */
     UI_MODE_TOUCH_CAL,    /* 触摸校准向导 */
     UI_MODE_IR,           /* 红外遥控（学习 / 发射） */
     UI_MODE_RADIO,        /* 网络电台 */
     UI_MODE_RADIO_LIST,   /* 电台列表选择 */
-    UI_MODE_NAV,          /* 导航提醒 */
     UI_MODE_OTA_PAGE,     /* 升级页（版本/进度/包大小） */
 } ui_mode_t;
 
-/** 首页 icon（顺序即轮播顺序） */
+/** 首页 icon（顺序即轮播顺序，也 = ui_emoji_t 顺序） */
 typedef enum {
     HOME_ICON_BILI = 0,   /* B站视频控制 */
     HOME_ICON_MOUSE,      /* 鼠标模拟 */
     HOME_ICON_IR,         /* 红外模拟 */
     HOME_ICON_RADIO,      /* 网络电台 */
-    HOME_ICON_NAV,        /* 导航提醒 */
     HOME_ICON_OTA,        /* 在线升级 */
     HOME_ICON_CAL,        /* 触摸校准 */
     HOME_ICON_COUNT
@@ -66,26 +69,21 @@ typedef enum {
     UI_BTN_HOME_ICON0,       /* 首页当前页 icon（点击进入对应功能） */
     UI_BTN_HOME_PREV,        /* 首页上一屏（左边缘） */
     UI_BTN_HOME_NEXT,        /* 首页下一屏（右边缘） */
-    /* B站控制页 */
+    /* 通用：任何非首页模式下点顶部状态栏（y < 26）= 返回首页 */
+    UI_BTN_HOME,
+    /* B站播放控制页（只保留播放相关） */
     UI_BTN_PREV_EPISODE,     /* 上一集 */
     UI_BTN_NEXT_EPISODE,     /* 下一集 */
     UI_BTN_PLAY_PAUSE,       /* 播放/暂停 */
     UI_BTN_VOLUME_UP,        /* 音量+ */
     UI_BTN_VOLUME_DOWN,      /* 音量- */
     UI_BTN_FULLSCREEN,       /* 全屏 */
-    UI_BTN_HOME,             /* 返回首页 */
-    UI_BTN_MOUSE_MODE,       /* 鼠标模式开关 */
-    UI_BTN_TOUCH_CAL,        /* 重新校准触摸 */
-    UI_BTN_OTA,              /* 检查固件更新（OTA） */
-    UI_BTN_IR_MODE,          /* 进入红外遥控 */
-    UI_BTN_NAV_MODE,         /* 进入导航提醒 */
     /* 电台模式 */
-    UI_BTN_RADIO_MODE,       /* 进入电台 */
     UI_BTN_RADIO_PREV,       /* 上一台 */
     UI_BTN_RADIO_NEXT,       /* 下一台 */
     UI_BTN_RADIO_TOGGLE,     /* 播放/停止 */
     UI_BTN_RADIO_LIST,       /* 查看台列表 */
-    UI_BTN_RADIO_LIST_BACK,  /* 台列表返回 */
+    UI_BTN_RADIO_LIST_BACK,  /* 台列表返回电台页 */
     UI_BTN_RADIO_PICK0,      /* 选择台 0..7（动态命中返回） */
     UI_BTN_RADIO_PICK1,
     UI_BTN_RADIO_PICK2,
@@ -94,7 +92,6 @@ typedef enum {
     UI_BTN_RADIO_PICK5,
     UI_BTN_RADIO_PICK6,
     UI_BTN_RADIO_PICK7,
-    UI_BTN_RADIO_BACK,       /* 返回首页 */
     /* 鼠标模式：左右键（按下=按住，抬起=松开，可拖拽） */
     UI_BTN_MOUSE_LEFT,       /* 左键 */
     UI_BTN_MOUSE_RIGHT,      /* 右键 */
@@ -102,15 +99,12 @@ typedef enum {
     UI_BTN_IR_LEARN,         /* 学习当前槽 */
     UI_BTN_IR_SEND,          /* 发射当前槽 */
     UI_BTN_IR_SLOT,          /* 切换槽位 */
-    UI_BTN_IR_BACK,          /* 返回首页 */
-    /* 导航提醒页 */
-    UI_BTN_NAV_TEST,         /* 推一条测试提醒 */
-    /* 升级页 */
-    UI_BTN_OTA_START,        /* 开始检查/升级 */
     /* 校准模式 */
     UI_BTN_CAL_NEXT,         /* 校准：下一集 */
     UI_BTN_CAL_PREV,         /* 校准：上一集 */
     UI_BTN_CAL_EXIT,         /* 校准：完成 */
+    /* 升级页 */
+    UI_BTN_OTA_START,        /* 开始检查/升级 */
     UI_BTN_MAX
 } ui_button_t;
 

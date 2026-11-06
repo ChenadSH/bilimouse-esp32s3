@@ -208,18 +208,30 @@ static esp_err_t radio_fetch_list(void)
         return err;
     }
     esp_http_client_fetch_headers(cli);
+    int code = esp_http_client_get_status_code(cli);
 
+    /* ⚠️ 这里必须用 sizeof(s_http_body)，不能用 sizeof(body)：
+       body 是 char* 指针，sizeof(body) 恒等于 4（指针大小），
+       于是循环只会读进 3 个字节就退出 -> JSON 被截断 -> 解析不到任何台。
+       这就是「电台读不到列表」的根因。 */
     char *body = s_http_body;
+    const size_t cap = sizeof(s_http_body);
     int n = 0, r;
-    while (n < (int)sizeof(body) - 1 &&
-           (r = esp_http_client_read(cli, body + n, sizeof(body) - 1 - n)) > 0) {
+    while (n < (int)cap - 1 &&
+           (r = esp_http_client_read(cli, body + n, cap - 1 - n)) > 0) {
         n += r;
     }
     esp_http_client_cleanup(cli);
     body[n] = '\0';
-    if (n <= 0) {
+    if (code != 200) {
+        ESP_LOGW(TAG, "station list http %d (%d bytes)", code, n);
         return ESP_ERR_NOT_FOUND;
     }
+    if (n <= 0) {
+        ESP_LOGW(TAG, "station list empty (http %d)", code);
+        return ESP_ERR_NOT_FOUND;
+    }
+    ESP_LOGI(TAG, "station list: %d bytes, http %d", n, code);
     return parse_stations(body);}
 
 /* ==================== 播放源（MP3 直连 / HLS） ==================== */
@@ -227,8 +239,8 @@ static esp_err_t radio_fetch_list(void)
 typedef struct {
     esp_http_client_handle_t cli;
     bool hls;
-    char base[192];              /* 当前 media playlist URL（相对地址基准） */
-    char segs[8][192];
+    char base[RADIO_URL_MAX];              /* 当前 media playlist URL（相对地址基准） */
+    char segs[8][RADIO_URL_MAX];
     int seg_cnt, seg_pos;
     bool need_playlist;
 } src_t;
@@ -276,10 +288,12 @@ static int fetch_playlist(const char *url, char *segs, int max_segs, int *seg_cn
     }
     esp_http_client_fetch_headers(cli);
 
+    /* 同上：指针的 sizeof 是 4，必须用 s_http_body 的真实大小 */
     char *text = s_http_body;
+    const size_t cap = sizeof(s_http_body);
     int n = 0, r;
-    while (n < (int)sizeof(text) - 1 &&
-           (r = esp_http_client_read(cli, text + n, sizeof(text) - 1 - n)) > 0) {
+    while (n < (int)cap - 1 &&
+           (r = esp_http_client_read(cli, text + n, cap - 1 - n)) > 0) {
         n += r;
     }
     text[n] = '\0';
@@ -302,14 +316,14 @@ static int fetch_playlist(const char *url, char *segs, int max_segs, int *seg_cn
         }
         if (want_stream) {
             /* master playlist：取第一个流地址再去拉 media playlist */
-            resolve_url(url, line, redirect, 192);
+            resolve_url(url, line, redirect, RADIO_URL_MAX);
             return 1;
         }
         if (*seg_cnt < max_segs) {
-            char abs[192];
+            char abs[RADIO_URL_MAX];
             resolve_url(url, line, abs, sizeof(abs));
             if (!was_played(abs)) {
-                strlcpy(segs + *seg_cnt * 192, abs, 192);
+                strlcpy(segs + *seg_cnt * RADIO_URL_MAX, abs, RADIO_URL_MAX);
                 (*seg_cnt)++;
             }
         }
@@ -352,7 +366,7 @@ static esp_err_t src_hls_next_segment(src_t *s)
 {
     int redirect_guard = 0;
     while (s->need_playlist) {
-        char redirect[192] = {0};
+        char redirect[RADIO_URL_MAX] = {0};
         int rc = fetch_playlist(s->base, (char *)s->segs, 8, &s->seg_cnt, redirect);
         if (rc == 1) {
             strlcpy(s->base, redirect, sizeof(s->base));   /* master -> media */

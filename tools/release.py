@@ -102,6 +102,7 @@ def main():
         "version": ver,
         "url": f"{LATEST}/bilimouse.bin",
         "notes": notes[:90],
+        "size": BIN.stat().st_size,   # 固件端检查更新时先显示包大小
     }).encode()
     api("POST",
         f"https://uploads.github.com/repos/{REPO}/releases/{rid}/assets?name=manifest.json",

@@ -113,11 +113,15 @@ size_t bsp_ir_capture(rmt_symbol_word_t *out, size_t max_symbols, uint32_t timeo
     xEventGroupClearBits(s_rx_evt, BIT_RX_DONE);
     s_rx_count = 0;
 
-    /* signal_range_max_ns = 40ms：接收头在最后一个跳变后静默 40ms
-       就自动判定一帧结束，不需要额外的超时逻辑。 */
+    /* signal_range_max_ns = 25ms：接收头在最后一个跳变后静默 25ms
+       就自动判定一帧结束，不需要额外的超时逻辑。
+       ⚠️ 不能设 40ms：ESP32-S3 RMT 的 idle 计数器是 15 位（上限 32767
+       tick），1MHz 分辨率下即 32.7ms —— 传 40ms 时 rmt_receive 直接返回
+       ESP_ERR_INVALID_ARG，学习永远失败。25ms 留足了余量
+       （NEC 帧内最长间隙 ~1.7ms，远小于 25ms）。 */
     rmt_receive_config_t rx_cfg = {
         .signal_range_min_ns = 1000,          /* <1us 当毛刺丢掉 */
-        .signal_range_max_ns = 40 * 1000 * 1000,
+        .signal_range_max_ns = 25 * 1000 * 1000,
     };
 
     esp_err_t err = rmt_receive(s_rx_chan, out, max_symbols * sizeof(rmt_symbol_word_t), &rx_cfg);

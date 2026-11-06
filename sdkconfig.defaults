@@ -50,6 +50,16 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # 家庭局域网用明文 HTTP 分发固件（生产环境应换 HTTPS 并配服务器证书）
 CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
 
+# 出厂默认 WiFi（串口 wifi set 存的凭据最优先）
+CONFIG_BILIMOUSE_WIFI_SSID="WPP-Guest"
+CONFIG_BILIMOUSE_WIFI_PASS="connected"
+CONFIG_BILIMOUSE_WIFI_SSID2="Grey Shanghai"
+CONFIG_BILIMOUSE_WIFI_PASS2="23202288"
+CONFIG_BILIMOUSE_WIFI_SSID3="九天诛仙"
+CONFIG_BILIMOUSE_WIFI_PASS3="20158888"
+# GitHub Releases 固定链接（永远指向最新版 manifest）
+CONFIG_BILIMOUSE_OTA_URL="https://github.com/ChenadSH/bilimouse-esp32s3/releases/latest/download/manifest.json"
+
 # ---- FATFS ----
 # IDF v6 的 fatfs 组件默认不带这些 Kconfig 值，需显式声明，
 # 否则 ffconf.h 会引用未定义的 CONFIG_FATFS_USE_LABEL 导致编译失败。

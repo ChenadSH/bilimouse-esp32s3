@@ -5,11 +5,18 @@
  * 自研轻量渲染器：RGB565 双缓冲 + 点阵字库，
  * 不引入 LVGL 等外部 GUI 框架，保证工程零外部依赖、离线可编译。
  *
+ * 页面结构（v2.6）：
+ *   首页    - emoji icon 左右滑动轮播，点 icon 进功能页
+ *   B站页   - 只留播放控制（上下集 / 播放暂停 / 音量 / 全屏）
+ *   电台页  - 二次元背景 + 半透明面板（台名/状态/控制按钮）
+ *   其余页  - 红外 / 鼠标 / 校准 / 升级，各自独立
+ *   跨页导航 - 统一走左上角「<」回首页，页面内不再堆其它功能的入口
+ *
  * 布局（320x240）：
- *   y   0.. 26  顶栏：连接状态 + 模式
- *   y  30.. 92  动作卡片：最近一次动作（大字）
- *   y  96..160  主按钮行：上一集 / 下一集 / 播放暂停（大热区）
- *   y 164..214  次按钮行：音量- / 音量+ / 全屏 / 鼠标
+ *   y   0.. 26  顶栏：返回键 + 模式 + 连接状态
+ *   y  30.. 88  动作卡片：最近一次动作（大字）
+ *   y  96..160  主按钮行
+ *   y 164..210  次按钮行
  *   y 218..240  底栏：提示
  */
 #include "ui.h"
@@ -25,11 +32,11 @@
 
 #include "bsp_lcd.h"
 #include "ui_font.h"
+#include "ui_emoji.h"
 #include "bg_radio.h"
 
 #include "esp_app_desc.h"
 #include "ota_update.h"
-#include "nav_alert.h"
 #include "radio.h"
 
 static const char *TAG = "ui";
@@ -59,34 +66,27 @@ typedef struct {
     uint16_t accent;
 } btn_def_t;
 
-/* ---- B站控制页（独立功能页） ----
- * 主按钮行（三个大按钮），副按钮行 9 个小按钮：
- * 音- 音+ 全屏 鼠标 电台 红外 导航 校准 升级
+/* ---- B站播放控制页（只保留播放相关功能） ----
+ * 主按钮行 3 个大按钮，副按钮行 3 个。
  * 坐标写字面量：preview_ui.py 按数字解析按钮表，带参宏解析不了。 */
 #define MAIN_BTN_Y      96
 #define MAIN_BTN_H      64
-#define SUB_BTN_Y       160
-#define SUB_BTN_H       54
-#define SUB_BTN_W       34
+#define SUB_BTN_Y       168
+#define SUB_BTN_H       40
+#define SUB_BTN_W       100
 
 static const btn_def_t s_main_btns[] = {
     { UI_BTN_PREV_EPISODE,   6,  MAIN_BTN_Y, 100, MAIN_BTN_H, "上一集", COL_ACCENT },
-    { UI_BTN_NEXT_EPISODE, 110,  MAIN_BTN_Y, 100, MAIN_BTN_H, "下一集", COL_ACCENT },
-    { UI_BTN_PLAY_PAUSE,   214,  MAIN_BTN_Y, 100, MAIN_BTN_H, "播放/暂停", COL_ACCENT },
+    { UI_BTN_PLAY_PAUSE,   110,  MAIN_BTN_Y, 100, MAIN_BTN_H, "播放/暂停", COL_ACCENT },
+    { UI_BTN_NEXT_EPISODE, 214,  MAIN_BTN_Y, 100, MAIN_BTN_H, "下一集", COL_ACCENT },
 };
 
 #define MAIN_BTN_CNT  (sizeof(s_main_btns) / sizeof(s_main_btns[0]))
 
 static const btn_def_t s_sub_btns[] = {
-    { UI_BTN_VOLUME_DOWN,     2, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "音-",   COL_SUBTEXT },
-    { UI_BTN_VOLUME_UP,      37, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "音+",   COL_SUBTEXT },
-    { UI_BTN_FULLSCREEN,     72, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "全屏",  COL_SUBTEXT },
-    { UI_BTN_MOUSE_MODE,    107, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "鼠标",  COL_SUBTEXT },
-    { UI_BTN_RADIO_MODE,    142, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "电台",  COL_SUBTEXT },
-    { UI_BTN_IR_MODE,       177, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "红外",  COL_SUBTEXT },
-    { UI_BTN_NAV_MODE,      212, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "导航",  COL_SUBTEXT },
-    { UI_BTN_TOUCH_CAL,     247, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "校准",  COL_SUBTEXT },
-    { UI_BTN_OTA,           282, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "升级",  COL_SUBTEXT },
+    { UI_BTN_VOLUME_DOWN,     6, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "音量-", COL_SUBTEXT },
+    { UI_BTN_VOLUME_UP,     112, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "音量+", COL_SUBTEXT },
+    { UI_BTN_FULLSCREEN,    218, SUB_BTN_Y, SUB_BTN_W, SUB_BTN_H, "全屏",  COL_SUBTEXT },
 };
 
 #define SUB_BTN_CNT  (sizeof(s_sub_btns) / sizeof(s_sub_btns[0]))
@@ -96,45 +96,40 @@ static const btn_def_t s_sub_btns[] = {
  *
  * 按键是「按住型」：手指按下立即发 mouse down，抬起才发 up，
  * 所以按住后往中间拖就是拖拽/框选，和真实鼠标一致。
- * 两侧留 58px，手指粗也能按准；中间 196px 宽足够划动指针。
- * 高度只到内容区为止（FOOTER_Y 上方留 8px），不压到底部。
+ * 返回首页统一走左上角「<」，触控板不再被出口按钮占掉一块。
  */
 #define MOUSE_BTN_W   58
 #define MOUSE_BTN_Y   30
 #define MOUSE_BTN_H   (FOOTER_Y - 8 - MOUSE_BTN_Y)   /* 30..210，footer 在 218 */
 
 static const btn_def_t s_mouse_btns[] = {
-    { UI_BTN_MOUSE_LEFT,   4,                    MOUSE_BTN_Y, MOUSE_BTN_W, MOUSE_BTN_H, "左键", COL_ACCENT },
-    { UI_BTN_MOUSE_RIGHT,  SCR_W - 4 - MOUSE_BTN_W, MOUSE_BTN_Y, MOUSE_BTN_W, MOUSE_BTN_H, "右键", COL_ACCENT },
-    /* 返回首页的出口：必须留着，否则进了鼠标模式就点不到别的按钮 */
-    { UI_BTN_HOME,         132,                  160,          56,           44,          "首页", COL_SUBTEXT },
+    { UI_BTN_MOUSE_LEFT,   4,                        MOUSE_BTN_Y, MOUSE_BTN_W, MOUSE_BTN_H, "左键", COL_ACCENT },
+    { UI_BTN_MOUSE_RIGHT,  SCR_W - 4 - MOUSE_BTN_W,  MOUSE_BTN_Y, MOUSE_BTN_W, MOUSE_BTN_H, "右键", COL_ACCENT },
 };
 
 #define MOUSE_BTN_CNT (sizeof(s_mouse_btns) / sizeof(s_mouse_btns[0]))
 
-/* 红外模式：学习 / 发射 / 切换槽 / 返回 */
-#define IR_BTN_Y   112
+/* 红外模式：学习 / 发射 / 切换槽（返回走左上角） */
+#define IR_BTN_Y   96
 #define IR_BTN_H   56
 
 static const btn_def_t s_ir_btns[] = {
-    { UI_BTN_IR_LEARN,   6,   IR_BTN_Y, 150, IR_BTN_H, "学习",   COL_ACCENT },
-    { UI_BTN_IR_SEND,  164,   IR_BTN_Y, 150, IR_BTN_H, "发射",   COL_OK },
+    { UI_BTN_IR_LEARN,   6,   IR_BTN_Y, 150, IR_BTN_H, "学习", COL_ACCENT },
+    { UI_BTN_IR_SEND,  164,   IR_BTN_Y, 150, IR_BTN_H, "发射", COL_OK },
     { UI_BTN_IR_SLOT,    6,   IR_BTN_Y + IR_BTN_H + 8, 150, 44, "换下一个槽", COL_SUBTEXT },
-    { UI_BTN_IR_BACK,  164,   IR_BTN_Y + IR_BTN_H + 8, 150, 44, "首页",   COL_SUBTEXT },
 };
 
 #define IR_BTN_CNT (sizeof(s_ir_btns) / sizeof(s_ir_btns[0]))
 
-/* 电台模式：二次元背景 + 底部控制条（不画 footer，按钮占满底部）。
-   台名与状态显示在上半区卡片；台列表是独立页（UI_MODE_RADIO_LIST）。 */
-#define RADIO_BTN_Y  158
+/* 电台模式：二次元背景 + 半透明面板（不画 footer，背景铺满全屏）。
+   台名与状态用动作卡片的内容（radio.c 会往里写），但改成半透明。 */
+#define RADIO_BTN_Y  104
 
 static const btn_def_t s_radio_btns[] = {
-    { UI_BTN_RADIO_PREV,     6,  RADIO_BTN_Y,      100, 32, "上一台",    COL_SUBTEXT },
-    { UI_BTN_RADIO_NEXT,   214,  RADIO_BTN_Y,      100, 32, "下一台",    COL_SUBTEXT },
-    { UI_BTN_RADIO_TOGGLE,   6,  RADIO_BTN_Y + 38, 100, 32, "播放/停止", COL_ACCENT },
-    { UI_BTN_RADIO_LIST,   112,  RADIO_BTN_Y + 38,  96, 32, "台列表",    COL_SUBTEXT },
-    { UI_BTN_HOME,         214,  RADIO_BTN_Y + 38, 100, 32, "首页",      COL_SUBTEXT },
+    { UI_BTN_RADIO_PREV,    10,  RADIO_BTN_Y,      94, 46, "上一台",   COL_ACCENT },
+    { UI_BTN_RADIO_TOGGLE, 112,  RADIO_BTN_Y,      94, 46, "播放/停止", COL_ACCENT },
+    { UI_BTN_RADIO_NEXT,   214,  RADIO_BTN_Y,      94, 46, "下一台",   COL_ACCENT },
+    { UI_BTN_RADIO_LIST,    10,  RADIO_BTN_Y + 54, 298, 40, "台列表",  COL_SUBTEXT },
 };
 
 #define RADIO_BTN_CNT (sizeof(s_radio_btns) / sizeof(s_radio_btns[0]))
@@ -145,36 +140,27 @@ static const btn_def_t s_radio_btns[] = {
 #define RLIST_MAX      8
 
 static const btn_def_t s_rlist_btns[] = {
-    { UI_BTN_RADIO_LIST_BACK, 6, 210, 308, 26, "返回", COL_SUBTEXT },
+    { UI_BTN_RADIO_LIST_BACK, 6, 206, 308, 26, "返回电台", COL_SUBTEXT },
 };
 
 #define RLIST_BTN_CNT (sizeof(s_rlist_btns) / sizeof(s_rlist_btns[0]))
 
-/* 导航提醒页 */
-static const btn_def_t s_nav_btns[] = {
-    { UI_BTN_NAV_TEST,     6, 176, 150, 42, "测试提醒", COL_WARN },
-    { UI_BTN_HOME,       164, 176, 150, 42, "首页",     COL_SUBTEXT },
-};
-
-#define NAV_BTN_CNT (sizeof(s_nav_btns) / sizeof(s_nav_btns[0]))
-
 /* 升级页 */
 static const btn_def_t s_ota_btns[] = {
-    { UI_BTN_OTA_START,    6, 170, 150, 44, "开始升级", COL_ACCENT },
-    { UI_BTN_HOME,       164, 170, 150, 44, "首页",     COL_SUBTEXT },
+    { UI_BTN_OTA_START,    6, 168, 308, 40, "开始检查更新", COL_ACCENT },
 };
 
 #define OTA_BTN_CNT (sizeof(s_ota_btns) / sizeof(s_ota_btns[0]))
 
 /* 校准模式按钮：两个大按钮 + 一个完成。
-   完成按钮必须完整落在底栏(218)之上，之前 h=80 时会被 footer 压住一半。 */
-#define CAL_BTN_Y      110
+   完成按钮必须完整落在底栏(218)之上。 */
+#define CAL_BTN_Y      96
 #define CAL_BTN_H      64
 
 static const btn_def_t s_cal_btns[] = {
     { UI_BTN_CAL_NEXT,   6,  CAL_BTN_Y, 150, CAL_BTN_H, "校准下一集", COL_ACCENT },
     { UI_BTN_CAL_PREV, 164,  CAL_BTN_Y, 150, CAL_BTN_H, "校准上一集", COL_ACCENT },
-    { UI_BTN_CAL_EXIT, 80,  CAL_BTN_Y + CAL_BTN_H + 8, 160, 32, "完成", COL_OK },
+    { UI_BTN_CAL_EXIT, 80,  CAL_BTN_Y + CAL_BTN_H + 8, 160, 40, "完成", COL_OK },
 };
 
 #define CAL_BTN_CNT  (sizeof(s_cal_btns) / sizeof(s_cal_btns[0]))
@@ -198,24 +184,21 @@ static void draw_frame(int x, int y, int w, int h, int t, uint16_t color);
 /* 触摸校准界面状态（UI_MODE_TOUCH_CAL 时使用） */
 static ui_touch_cal_state_t s_tcal = { .stage = -1 };
 
-/* ---- 首页轮播 ----
+/* ---- 首页 emoji 轮播 ----
  * 一屏一个 icon，左右滑动切换；点 icon 进对应功能页。
- * 页序 = home_icon_t 枚举顺序。 */
+ * 页序 = home_icon_t 枚举顺序 = ui_emoji_t 顺序。 */
 static int s_home_page;
 
 static const struct {
     home_icon_t icon;
     const char *name;     /* icon 下方标题 */
-    const char *glyph;    /* icon 方块里的 2 字大字 */
-    uint16_t color;
 } s_home_icons[HOME_ICON_COUNT] = {
-    { HOME_ICON_BILI,  "B站视频控制", "B站", COL_ACCENT },
-    { HOME_ICON_MOUSE, "鼠标模拟",     "鼠标", COL_OK },
-    { HOME_ICON_IR,    "红外模拟",     "红外", COL_WARN },
-    { HOME_ICON_RADIO, "网络电台",     "电台", 0x4BD7 /* 亮青 */ },
-    { HOME_ICON_NAV,   "导航提醒",     "导航", 0xFD20 /* 橙 */ },
-    { HOME_ICON_OTA,   "在线升级",     "升级", COL_SUBTEXT },
-    { HOME_ICON_CAL,   "触摸校准",     "校准", 0xFB56 /* 粉 */ },
+    { HOME_ICON_BILI,  "B站视频控制" },
+    { HOME_ICON_MOUSE, "鼠标模拟" },
+    { HOME_ICON_IR,    "红外模拟" },
+    { HOME_ICON_RADIO, "网络电台" },
+    { HOME_ICON_OTA,   "在线升级" },
+    { HOME_ICON_CAL,   "触摸校准" },
 };
 
 /* ==================== 绘图基础 ==================== */
@@ -237,6 +220,41 @@ static void fill_rect(int x, int y, int w, int h, uint16_t color)
     }
 }
 
+/** 半透明矩形：与帧缓冲里已有的颜色按 alpha (0..255) 混合。
+ *  电台页的背景图上叠面板/按钮全靠它，否则一整块实色面板
+ *  会把精心生成的二次元背景糊死。 */
+static void blend_rect(int x, int y, int w, int h, uint16_t color, int alpha)
+{
+    if (alpha >= 255) {
+        fill_rect(x, y, w, h, color);
+        return;
+    }
+    if (alpha <= 0) {
+        return;
+    }
+    int cr = (color >> 11) & 0x1F;
+    int cg = (color >> 5) & 0x3F;
+    int cb = color & 0x1F;
+    for (int j = y; j < y + h; j++) {
+        if (j < 0 || j >= SCR_H) {
+            continue;
+        }
+        for (int i = x; i < x + w; i++) {
+            if (i < 0 || i >= SCR_W) {
+                continue;
+            }
+            uint16_t c = s_buf[j * SCR_W + i];
+            int r = (c >> 11) & 0x1F;
+            int g = (c >> 5) & 0x3F;
+            int b = c & 0x1F;
+            r = (r * (255 - alpha) + cr * alpha) / 255;
+            g = (g * (255 - alpha) + cg * alpha) / 255;
+            b = (b * (255 - alpha) + cb * alpha) / 255;
+            s_buf[j * SCR_W + i] = (uint16_t)((r << 11) | (g << 5) | b);
+        }
+    }
+}
+
 static void fill_round_rect(int x, int y, int w, int h, int r, uint16_t color)
 {
     fill_rect(x + r, y, w - 2 * r, h, color);
@@ -244,6 +262,16 @@ static void fill_round_rect(int x, int y, int w, int h, int r, uint16_t color)
     fill_rect(x + w - r, y + r, r, h - 2 * r, color);
     fill_rect(x + r, y + r, w - 2 * r, r, color);
     fill_rect(x + r, y + h - r, w - 2 * r, r, color);
+}
+
+/** 半透明圆角矩形（四角保留背景，混合同 fill_round_rect 的分块方式） */
+static void blend_round_rect(int x, int y, int w, int h, int r, uint16_t color, int alpha)
+{
+    blend_rect(x + r, y, w - 2 * r, h, color, alpha);
+    blend_rect(x, y + r, r, h - 2 * r, color, alpha);
+    blend_rect(x + w - r, y + r, r, h - 2 * r, color, alpha);
+    blend_rect(x + r, y + r, w - 2 * r, r, color, alpha);
+    blend_rect(x + r, y + h - r, w - 2 * r, r, color, alpha);
 }
 
 /**
@@ -349,7 +377,7 @@ static int text_width(const char *str)
 /* ==================== 界面元素 ==================== */
 
 /** 顶部状态栏：连接状态点 + 模式文字。
-    非首页模式左侧画「‹」，点击头部区域返回首页。 */
+    非首页模式左侧画「<」，这是全设备唯一的跨页返回入口。 */
 static void draw_header(void)
 {
     fill_rect(0, 0, SCR_W, HEADER_H, COL_PANEL);
@@ -361,7 +389,6 @@ static void draw_header(void)
     case UI_CONN_DISCONNECTED:
     default:                   dot_col = COL_ERR;   break;
     }
-    fill_round_rect(8, 8, 10, 10, 3, dot_col);
 
     const char *mode_txt;
     switch (s_mode) {
@@ -373,23 +400,21 @@ static void draw_header(void)
     case UI_MODE_IR:         mode_txt = "红外遥控";   break;
     case UI_MODE_RADIO:      mode_txt = "网络电台";   break;
     case UI_MODE_RADIO_LIST: mode_txt = "选择电台";   break;
-    case UI_MODE_NAV:        mode_txt = "导航提醒";   break;
     case UI_MODE_OTA_PAGE:   mode_txt = "在线升级";   break;
     default:                 mode_txt = "";           break;
     }
 
-    int conn_tw;
     const char *conn_txt;
     switch (s_conn) {
     case UI_CONN_CONNECTED:    conn_txt = "已连接"; break;
     case UI_CONN_PAIRING:      conn_txt = "配对中"; break;
     default:                   conn_txt = "未连接"; break;
     }
-    conn_tw = text_width(conn_txt);
+    int conn_tw = text_width(conn_txt);
     draw_text(SCR_W - 10 - conn_tw, 5, conn_txt, dot_col, 100);
 
     if (s_mode != UI_MODE_HOME) {
-        /* 左上角「<」= 点这里回首页；状态点和模式文字整体右移 */
+        /* 左上角「<」= 点这里回首页 */
         draw_text(2, 5, "<", COL_ACCENT, 20);
         fill_round_rect(22, 8, 10, 10, 3, dot_col);
         draw_text(38, 5, mode_txt, COL_TEXT, 150);
@@ -399,13 +424,17 @@ static void draw_header(void)
     }
 }
 
-/** 动作卡片：最近一次动作（可指定横向范围，鼠标模式要避开左右键） */
-static void draw_action_card_in(int card_x, int card_w)
+/** 动作卡片：最近一次动作（可指定横向范围与透明度） */
+static void draw_action_card_in(int card_x, int card_w, int alpha)
 {
     int card_y = HEADER_H + 4;
     int card_h = 58;
 
-    fill_round_rect(card_x, card_y, card_w, card_h, 8, COL_PANEL);
+    if (alpha >= 255) {
+        fill_round_rect(card_x, card_y, card_w, card_h, 8, COL_PANEL);
+    } else {
+        blend_round_rect(card_x, card_y, card_w, card_h, 8, COL_PANEL, alpha);
+    }
     fill_rect(card_x, card_y, card_w, 3, COL_ACCENT);
 
     /* 主标题（居中） */
@@ -429,20 +458,25 @@ static void draw_action_card_in(int card_x, int card_w)
 
 static void draw_action_card(void)
 {
-    draw_action_card_in(6, SCR_W - 12);
+    draw_action_card_in(6, SCR_W - 12, 255);
 }
+
+/** 当前页按钮是否画成半透明（电台页的按钮叠在背景图上） */
+static int s_btn_alpha = 255;
 
 /** 带文字的按钮 */
 static void draw_button(int x, int y, int w, int h, const char *label, uint16_t accent)
 {
-    fill_round_rect(x, y, w, h, 8, COL_PANEL);
+    if (s_btn_alpha >= 255) {
+        fill_round_rect(x, y, w, h, 8, COL_PANEL);
+    } else {
+        blend_round_rect(x, y, w, h, 8, COL_PANEL, s_btn_alpha);
+    }
     /* 上下强调条，让按钮边界清晰可辨 */
     fill_rect(x + 8, y, w - 16, 3, accent);
     fill_rect(x + 8, y + h - 3, w - 16, 3, accent);
 
     int tw = text_width(label);
-    /* 44px 的小按钮放"音量-"(40px) 时只剩 2px 边距：居中并放宽裁剪，
-       代替以前的"超宽就左对齐截断"策略 */
     int tx = x + (w - tw) / 2;
     if (tx < x + 2) {
         tx = x + 2;
@@ -468,47 +502,72 @@ static void draw_footer(void)
     }
 }
 
-/* ==================== 首页轮播 ==================== */
+/* ==================== 首页（emoji 轮播） ==================== */
 
-#define HOME_BOX_X   105
-#define HOME_BOX_Y   54
-#define HOME_BOX_SZ  110
+#define HOME_TILE_X   112
+#define HOME_TILE_Y   34
+#define HOME_TILE_SZ  96
+#define HOME_EMOJI_O  ((HOME_TILE_SZ - UI_EMOJI_SZ) / 2)   /* 12 */
+
+static const uint16_t *home_emoji_bitmap(int idx)
+{
+    switch (s_home_icons[idx].icon) {
+    case HOME_ICON_BILI:  return ui_emoji_bili;
+    case HOME_ICON_MOUSE: return ui_emoji_mouse;
+    case HOME_ICON_IR:    return ui_emoji_ir;
+    case HOME_ICON_RADIO: return ui_emoji_radio;
+    case HOME_ICON_OTA:   return ui_emoji_ota;
+    case HOME_ICON_CAL:   return ui_emoji_cal;
+    default:              return ui_emoji_bili;
+    }
+}
+
+/** 整块贴 72x72 的预合成 emoji（emoji 自带磁贴底色，与底色无缝衔接） */
+static void blit_emoji(int x, int y, const uint16_t *bmp)
+{
+    for (int j = 0; j < UI_EMOJI_SZ; j++) {
+        int dy = y + j;
+        if (dy < 0 || dy >= SCR_H) {
+            continue;
+        }
+        memcpy(s_buf + dy * SCR_W + x, bmp + j * UI_EMOJI_SZ,
+               UI_EMOJI_SZ * sizeof(uint16_t));
+    }
+}
 
 static void draw_home(void)
 {
-    const char *name = s_home_icons[s_home_page].name;
-    const char *glyph = s_home_icons[s_home_page].glyph;
-    uint16_t col = s_home_icons[s_home_page].color;
+    const uint16_t *emoji = home_emoji_bitmap(s_home_page);
+    uint16_t tile_bg = ui_emoji_tile_bg[s_home_page];
+    uint16_t border = ui_emoji_tile_border[s_home_page];
 
-    /* 大 icon 方块 + 描边 */
-    fill_round_rect(HOME_BOX_X, HOME_BOX_Y, HOME_BOX_SZ, HOME_BOX_SZ, 14, COL_PANEL);
-    draw_frame(HOME_BOX_X, HOME_BOX_Y, HOME_BOX_SZ, HOME_BOX_SZ, 3, col);
-    int gw = text_width(glyph);
-    draw_text(HOME_BOX_X + (HOME_BOX_SZ - gw) / 2, HOME_BOX_Y + 18, glyph, col, HOME_BOX_SZ - 8);
-    /* 「点按打开」小字 */
-    int hw = text_width("点按打开");
-    draw_text(HOME_BOX_X + (HOME_BOX_SZ - hw) / 2, HOME_BOX_Y + 80, "点按打开", COL_SUBTEXT, HOME_BOX_SZ - 8);
+    /* 大磁贴 + 描边 + emoji */
+    fill_round_rect(HOME_TILE_X, HOME_TILE_Y, HOME_TILE_SZ, HOME_TILE_SZ, 14, tile_bg);
+    blit_emoji(HOME_TILE_X + HOME_EMOJI_O, HOME_TILE_Y + HOME_EMOJI_O, emoji);
+    draw_frame(HOME_TILE_X, HOME_TILE_Y, HOME_TILE_SZ, HOME_TILE_SZ, 2, border);
 
     /* 功能名 */
+    const char *name = s_home_icons[s_home_page].name;
     int nw = text_width(name);
-    draw_text((SCR_W - nw) / 2, HOME_BOX_Y + HOME_BOX_SZ + 12, name, COL_TEXT, 200);
+    draw_text((SCR_W - nw) / 2, HOME_TILE_Y + HOME_TILE_SZ + 12, name,
+              COL_TEXT, 200);
 
     /* 页点 */
     for (int i = 0; i < HOME_ICON_COUNT; i++) {
         int dx = (SCR_W - HOME_ICON_COUNT * 14) / 2 + i * 14 + 4;
-        fill_round_rect(dx, 208, 6, 6, 3, i == s_home_page ? COL_ACCENT : COL_SUBTEXT);
+        fill_round_rect(dx, 194, 6, 6, 3, i == s_home_page ? COL_ACCENT : COL_SUBTEXT);
     }
 
     /* 左右滑动提示 */
-    draw_text(12, 100, "<", COL_SUBTEXT, 20);
-    draw_text(SCR_W - 24, 100, ">", COL_SUBTEXT, 20);
+    draw_text(14, 72, "<", COL_SUBTEXT, 20);
+    draw_text(SCR_W - 30, 72, ">", COL_SUBTEXT, 20);
 }
 
 /* ==================== 电台页（背景图版） ==================== */
 
 static void draw_radio_bg(void)
 {
-    /* 逐行拷贝背景（PSRAM 源 -> 帧缓冲），比逐像素快 */
+    /* 逐行拷贝背景（flash 常量 -> 帧缓冲），比逐像素快 */
     for (int y = 0; y < SCR_H; y++) {
         memcpy(s_buf + y * SCR_W, bg_radio + y * SCR_W, SCR_W * sizeof(uint16_t));
     }
@@ -546,42 +605,6 @@ static void draw_radio_list(void)
     }
 }
 
-/* ==================== 导航提醒页 ==================== */
-
-static void draw_nav_page(void)
-{
-    char msg[NAV_TEXT_MAX];
-    nav_alert_get(msg, sizeof(msg), NULL);
-    if (!msg[0]) {
-        strcpy(msg, "暂无提醒");
-    }
-
-    /* 大卡片：最近一条提醒 */
-    fill_round_rect(6, 32, 308, 76, 8, COL_PANEL);
-    fill_rect(6, 32, 308, 3, COL_WARN);
-    int mw = text_width(msg);
-    draw_text(mw > 292 ? 14 : (6 + (308 - mw) / 2), 44, msg, COL_TEXT, 292);
-    int64_t ts = 0;
-    nav_alert_get(msg, sizeof(msg), &ts);
-    if (ts) {
-        char ago[32];
-        snprintf(ago, sizeof(ago), "%d 分钟前", (int)((esp_timer_get_time() - ts) / 60000000ll));
-        int aw = text_width(ago);
-        draw_text((320 - aw) / 2, 84, ago, COL_SUBTEXT, 160);
-    }
-
-    /* 推送地址说明 */
-    char ip[24];
-    nav_alert_get_ip(ip, sizeof(ip));
-    fill_round_rect(6, 116, 308, 52, 8, COL_PANEL);
-    draw_text(14, 122, "iPhone 快捷指令推送到:", COL_SUBTEXT, 290);
-    char line[64];
-    snprintf(line, sizeof(line), "http://%s:8080/nav?text=内容", ip);
-    draw_text(14, 142, line, COL_TEXT, 292);
-
-    draw_btn_group(s_nav_btns, NAV_BTN_CNT);
-}
-
 /* ==================== 升级页 ==================== */
 
 static void draw_ota_page(void)
@@ -590,13 +613,13 @@ static void draw_ota_page(void)
     ota_progress_t p;
     ota_update_get_progress(&p);
 
-    fill_round_rect(6, 32, 308, 130, 8, COL_PANEL);
+    fill_round_rect(6, 32, 308, 128, 8, COL_PANEL);
 
     char line[96];
     snprintf(line, sizeof(line), "当前版本: %.40s", app->version);
     draw_text(16, 42, line, COL_TEXT, 290);
 
-    snprintf(line, sizeof(line), "状态: %.24s %.40s", p.stage, p.detail);
+    snprintf(line, sizeof(line), "状态: %.20s %.36s", p.stage, p.detail);
     draw_text(16, 64, line, strcmp(p.stage, "失败") == 0 ? COL_ERR : COL_SUBTEXT, 290);
 
     /* 进度条 */
@@ -666,8 +689,10 @@ static void redraw(void)
     }
     if (s_mode == UI_MODE_RADIO) {
         draw_radio_bg();       /* 整屏背景图代替纯色底 */
+        s_btn_alpha = 170;     /* 面板/按钮半透明，让背景透出来 */
     } else {
         fill_rect(0, 0, SCR_W, SCR_H, COL_BG);
+        s_btn_alpha = 255;
     }
     draw_header();
 
@@ -693,15 +718,13 @@ static void redraw(void)
         draw_btn_group(s_ir_btns, IR_BTN_CNT);
         break;
     case UI_MODE_RADIO:
-        draw_action_card();
+        /* 电台页：半透明动作卡片显示台名/状态（radio.c 会写进来） */
+        draw_action_card_in(10, 300, s_btn_alpha);
         draw_btn_group(s_radio_btns, RADIO_BTN_CNT);
         break;
     case UI_MODE_RADIO_LIST:
         draw_radio_list();
         draw_btn_group(s_rlist_btns, RLIST_BTN_CNT);
-        break;
-    case UI_MODE_NAV:
-        draw_nav_page();
         break;
     case UI_MODE_OTA_PAGE:
         draw_ota_page();
@@ -709,7 +732,7 @@ static void redraw(void)
     default:
         /* 鼠标模式：左右两个按住型按键，中间是触控板。
            卡片缩窄到中间，避免被按键压住。 */
-        draw_action_card_in(70, SCR_W - 140);
+        draw_action_card_in(70, SCR_W - 140, 255);
         draw_btn_group(s_mouse_btns, MOUSE_BTN_CNT);
         break;
     }
@@ -742,20 +765,20 @@ ui_button_t ui_hit_test(uint16_t x, uint16_t y)
         return UI_BTN_NONE;
     }
     if (s_mode == UI_MODE_HOME) {
-        /* 大 icon 热区（略放大，好点） */
-        if (x >= HOME_BOX_X - 10 && x < HOME_BOX_X + HOME_BOX_SZ + 10 &&
-            y >= HOME_BOX_Y - 6 && y < HOME_BOX_Y + HOME_BOX_SZ + 40) {
+        /* 大磁贴热区（略放大，好点），含下方功能名 */
+        if (x >= HOME_TILE_X - 16 && x < HOME_TILE_X + HOME_TILE_SZ + 16 &&
+            y >= HOME_TILE_Y - 6 && y < HOME_TILE_Y + HOME_TILE_SZ + 30) {
             return UI_BTN_HOME_ICON0;
         }
-        if (x < 60) {
+        if (x < 70) {
             return UI_BTN_HOME_PREV;
         }
-        if (x >= SCR_W - 60) {
+        if (x >= SCR_W - 70) {
             return UI_BTN_HOME_NEXT;
         }
         return UI_BTN_NONE;
     }
-    /* 非首页：点顶部状态栏 = 返回首页 */
+    /* 非首页：点顶部状态栏 = 返回首页（全设备统一的返回入口） */
     if (y < HEADER_H) {
         return UI_BTN_HOME;
     }
@@ -788,9 +811,6 @@ ui_button_t ui_hit_test(uint16_t x, uint16_t y)
             }
         }
         return hit_group(s_rlist_btns, RLIST_BTN_CNT, x, y);
-    }
-    if (s_mode == UI_MODE_NAV) {
-        return hit_group(s_nav_btns, NAV_BTN_CNT, x, y);
     }
     if (s_mode == UI_MODE_OTA_PAGE) {
         return hit_group(s_ota_btns, OTA_BTN_CNT, x, y);
@@ -825,7 +845,7 @@ esp_err_t ui_init(void)
 
     strcpy(s_title, "BiliMouse");
     strcpy(s_subtitle, "等待连接");
-    strcpy(s_footer, "左右滑动选功能，点 icon 打开");
+    strcpy(s_footer, "左右滑动选功能，点图标打开");
 
     bsp_lcd_set_backlight(80);
     s_dirty = true;

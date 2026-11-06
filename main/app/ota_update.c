@@ -36,7 +36,7 @@ static const char *TAG = "ota";
 #define NVS_KEY_PASS    "wifi_pass"
 #define NVS_KEY_OTA_URL "ota_url"
 
-#define WIFI_TIMEOUT_MS   20000
+#define WIFI_TIMEOUT_MS   9000
 #define OTA_TASK_STACK    9216
 #define AUTO_CHECK_DELAY_S 30
 
@@ -46,6 +46,12 @@ static bool s_wifi_inited;
 static volatile bool s_wifi_got_ip;
 static esp_event_handler_instance_t s_ev_any;
 static esp_event_handler_instance_t s_ev_ip;
+
+/* 升级任务防重入（定义在文件后面的 ota_update_start_manual 里用） */
+static volatile bool s_ota_running;
+
+/* 进度更新（实现见「升级执行」小节），WiFi 阶段就要用来刷屏 */
+static void prog_set(const char *stage, const char *detail);
 
 static void wifi_event_cb(void *arg, esp_event_base_t base,
                           int32_t id, void *data)
@@ -188,6 +194,11 @@ static esp_err_t wifi_ensure_connected(void)
         ESP_LOGI(TAG, "wifi connecting: %s%s", list[i].ssid,
                  (i == 0 && nvs_used) ? " (NVS)" : "");
         any_configured = true;
+        /* 屏上同步显示正在试哪个热点：之前三个热点串行各等 20s，
+           屏幕毫无变化，用户以为卡死了。现在每换一个热点都有反馈，
+           且单个热点最多等 9s，最坏 27s 内出结论。 */
+        prog_set("连接WiFi", list[i].ssid);
+        ui_show_action("连接 WiFi", list[i].ssid);
         wifi_try_cred(&list[i]);
         if (s_wifi_got_ip) {
             ESP_LOGI(TAG, "wifi connected via %s", list[i].ssid);
@@ -203,6 +214,7 @@ typedef struct {
     char version[24];
     char url[192];
     char notes[96];
+    int  size;       /* 升级包字节数（可选字段，旧 manifest 没有 = 0） */
 } ota_manifest_t;
 
 /** manifest URL：NVS 覆盖 Kconfig */
@@ -311,6 +323,10 @@ static esp_err_t manifest_fetch(ota_manifest_t *m)
         char *q = strchr(m->url, '"');
         if (q) *q = '\0';
     }
+    const char *s = strstr(body, "\"size\"");
+    if (s) {
+        m->size = atoi(strchr(s + 6, ':') + 1);
+    }
     if (m->version[0] == '\0' || m->url[0] == '\0') {
         ESP_LOGW(TAG, "manifest missing version/url");
         return ESP_ERR_INVALID_RESPONSE;
@@ -362,6 +378,11 @@ static esp_err_t ota_perform(const ota_manifest_t *m)
         ESP_LOGE(TAG, "ota begin failed: %s", esp_err_to_name(err));
         prog_set("失败", "连接升级服务器失败");
         return err;
+    }
+    /* manifest 没带 size 时，这里能拿到镜像真实大小 */
+    int img_total = esp_https_ota_get_image_size(h);
+    if (img_total > 0) {
+        s_prog.total_kb = img_total / 1024;
     }
 
     /* 读到镜像头后先看一眼新固件的版本，再决定要不要继续 */
@@ -467,6 +488,11 @@ static void ota_run(bool auto_triggered)
     ESP_LOGI(TAG, "new version available: %s -> %s", cur->version, m.version);
     power_mgr_notify_activity();
 
+    /* manifest 里带了包大小就先亮出来，不用等下载开始才知道 */
+    if (m.size > 0) {
+        s_prog.total_kb = m.size / 1024;
+    }
+
     /* ---- 4. 下载写入备槽 ---- */
     if (ota_perform(&m) != ESP_OK) {
         if (strcmp(s_prog.stage, "失败") != 0) {
@@ -495,12 +521,23 @@ static void ota_manual_task(void *arg)
 {
     (void)arg;
     ota_run(false);
+    s_ota_running = false;
     vTaskDelete(NULL);
 }
 
 void ota_update_start_manual(void)
 {
-    xTaskCreate(ota_manual_task, "ota_task", OTA_TASK_STACK, NULL, 3, NULL);
+    /* 防重入：连点「开始检查更新」会起多个任务同时抢 WiFi/flash，
+     * 轻则进度条乱跳，重则两个 esp_https_ota 写坏分区表。 */
+    if (s_ota_running) {
+        ESP_LOGW(TAG, "ota already running, ignore");
+        ui_show_hint("检查更新进行中");
+        return;
+    }
+    s_ota_running = true;
+    if (xTaskCreate(ota_manual_task, "ota_task", OTA_TASK_STACK, NULL, 3, NULL) != pdPASS) {
+        s_ota_running = false;
+    }
 }
 
 /* ==================== 自动检查 ==================== */

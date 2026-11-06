@@ -26,10 +26,11 @@ def convert(src):
         y0 = (h - nh) // 2
         img = img.crop((0, y0, w, y0 + nh))
     img = img.resize((TW, TH), Image.LANCZOS)
-    # 底部压暗，保证按钮文字可读
+    # 轻微压暗（0.95 -> 0.80）：IPS 屏亮度高，原图直出会太刺眼；
+    # 控制条与卡片在固件里用半透明面板叠上去，不需要在这里压死。
     px = img.load()
-    for y in range(160, TH):
-        f = 0.55 + 0.45 * (y - 160) / (TH - 160)
+    for y in range(TH):
+        f = 0.95 - 0.15 * y / (TH - 1)
         for x in range(TW):
             r0, g0, b0 = px[x, y]
             px[x, y] = (int(r0 * f), int(g0 * f), int(b0 * f))
@@ -53,9 +54,9 @@ def convert(src):
             "extern const uint16_t bg_radio[BG_RADIO_W * BG_RADIO_H];\n")
     lines = []
     for i in range(0, len(out), 12):
-        lines.append("    " + ",".join(f"0x{b:02X}" for b in out[i:i + 12]) + ",")
+        lines.append("    " + ",".join(f"0x{v:04X}" for v in out[i:i + 12]) + ",")
     with open(src_c, "w", encoding="utf-8") as f:
-        f.write("/* 自动生成：电台页背景，320x240 RGB565 大端。生成: python tools/gen_bg.py */\n"
+        f.write("/* 自动生成：电台页背景，320x240 RGB565（与帧缓冲同格式）。生成: python tools/gen_bg.py */\n"
                 '#include "bg_radio.h"\n\n'
                 '#include "esp_attr.h"\n\n'
                 "const uint16_t bg_radio[BG_RADIO_W * BG_RADIO_H] = {\n"
