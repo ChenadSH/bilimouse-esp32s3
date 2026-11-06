@@ -1,1 +1,1 @@
-{"version": "2.7.0", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.7.0/ota/bilimouse.bin", "notes": "\u7535\u53f0\u5217\u8868\u4fee\u590d\uff08PSRAM \u4efb\u52a1\u6808 + \u8f6f\u4ef6 AES\uff09", "size": 1921520}
+{"version": "2.7.1", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.7.1/ota/bilimouse.bin", "notes": "\u5237\u5c4f\u5206\u6761\u4fee\u590d\uff08\u6574\u5e27 DMA \u7f13\u51b2\u5206\u914d\u5931\u8d25\u5bfc\u81f4\u753b\u9762\u5361\u4f4f\uff09", "size": 1921568}
