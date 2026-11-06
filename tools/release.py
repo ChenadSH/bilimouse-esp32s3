@@ -69,10 +69,10 @@ def main():
     if not token:
         sys.exit("error: 缺少 GITHUB_TOKEN")
 
-    # 1. 版本号写进 CMakeLists.txt
+    # 1. 版本号写进 CMakeLists.txt（已是目标版本则跳过，不算错误）
     text = CMAKELISTS.read_text(encoding="utf-8")
     new_text = re.sub(r'(set\(PROJECT_VER\s*")[^"]+(")', rf"\g<1>{ver}\g<2>", text)
-    if new_text == text:
+    if new_text == text and f'set(PROJECT_VER "{ver}")' not in text:
         sys.exit("error: CMakeLists.txt 里找不到 PROJECT_VER")
     CMAKELISTS.write_text(new_text, encoding="utf-8")
     print(f"PROJECT_VER -> {ver}")
