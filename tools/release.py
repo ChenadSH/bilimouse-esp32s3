@@ -84,9 +84,10 @@ def main():
 
     # 3. 编译：直接 call env.bat + idf.py，退出码可靠
     #    （build.bat 在部分终端下即使成功也返回 1；且增量编译不刷新
-    #    bilimouse.bin，不能拿文件时间当成功依据）
-    build_cmd = ('call "{}" && cd /d "{}" && python "%IDF_PATH%\\tools\\idf.py" build'
-                 .format(ROOT / "tools" / "env.bat", ROOT))
+    #    bilimouse.bin，不能拿文件时间当成功依据。
+    #    注意 cmd /c 的引号转义很怪，路径无空格时干脆不加引号）
+    build_cmd = ('call {}\\tools\\env.bat && cd /d {} && '
+                 'python "%IDF_PATH%\\tools\\idf.py" build').format(ROOT, ROOT)
     r = subprocess.run(["cmd", "/c", build_cmd], cwd=ROOT)
     if r.returncode != 0:
         sys.exit(f"error: idf.py build failed ({r.returncode})")
