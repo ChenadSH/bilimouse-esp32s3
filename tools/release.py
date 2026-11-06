@@ -116,7 +116,8 @@ def main():
     }
     (OTA_DIR / "manifest.json").write_bytes(json.dumps(manifest).encode())
     (OTA_DIR / "bilimouse.bin").write_bytes(BIN.read_bytes())
-    run(["git", "add", "ota"])
+    run(["git", "add", "ota/manifest.json"])
+    run(["git", "add", "-f", "ota/bilimouse.bin"])   # 仓库 .gitignore 掉了 *.bin
     subprocess.run(["git", "commit", "-m", f"ota assets: v{ver}"], cwd=ROOT)
     run(["git", "push", "origin", "master"])
 
