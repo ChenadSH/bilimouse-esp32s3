@@ -1,1 +1,1 @@
-{"version": "2.6.5", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.6.5/ota/bilimouse.bin", "notes": "OTA \u8d44\u4ea7\u6539\u8d70 raw \u901a\u9053\uff08Releases CDN \u5bf9\u8bbe\u5907 TLS \u6307\u7eb9\u8fd4\u56de 618\uff09", "size": 1931248}
+{"version": "2.6.6", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.6.6/ota/bilimouse.bin", "notes": "\u4fee\u590d\u5347\u7ea7\u6309\u94ae\u65e0\u6548\uff08download \u5b88\u536b\u4e0e READY \u72b6\u6001\u51b2\u7a81\uff09", "size": 1931248}
