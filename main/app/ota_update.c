@@ -47,11 +47,8 @@ static volatile bool s_wifi_got_ip;
 static esp_event_handler_instance_t s_ev_any;
 static esp_event_handler_instance_t s_ev_ip;
 
-/* 升级任务防重入（定义在文件后面的 ota_update_start_manual 里用） */
-static volatile bool s_ota_running;
-
-/* 进度更新（实现见「升级执行」小节），WiFi 阶段就要用来刷屏 */
-static void prog_set(const char *stage, const char *detail);
+/* 升级状态快照与 WiFi 步骤文案（定义见「状态快照」小节） */
+static void state_wifi(const char *txt);
 
 static void wifi_event_cb(void *arg, esp_event_base_t base,
                           int32_t id, void *data)
@@ -194,13 +191,15 @@ static esp_err_t wifi_ensure_connected(void)
         ESP_LOGI(TAG, "wifi connecting: %s%s", list[i].ssid,
                  (i == 0 && nvs_used) ? " (NVS)" : "");
         any_configured = true;
-        /* 屏上同步显示正在试哪个热点：之前三个热点串行各等 20s，
-           屏幕毫无变化，用户以为卡死了。现在每换一个热点都有反馈，
-           且单个热点最多等 9s，最坏 27s 内出结论。 */
-        prog_set("连接WiFi", list[i].ssid);
-        ui_show_action("连接 WiFi", list[i].ssid);
+        /* 屏上同步显示正在试哪个热点：三个热点串行各等 9s，
+           每换一个热点都有反馈，最坏 27s 内出结论。 */
+        char wifi_txt[48];
+        snprintf(wifi_txt, sizeof(wifi_txt), "正在连 %s", list[i].ssid);
+        state_wifi(wifi_txt);
         wifi_try_cred(&list[i]);
         if (s_wifi_got_ip) {
+            snprintf(wifi_txt, sizeof(wifi_txt), "已连 %s", list[i].ssid);
+            state_wifi(wifi_txt);
             ESP_LOGI(TAG, "wifi connected via %s", list[i].ssid);
         }
     }
@@ -335,33 +334,37 @@ static esp_err_t manifest_fetch(ota_manifest_t *m)
     return ESP_OK;
 }
 
-/* ==================== 升级执行 ==================== */
+/* ==================== 状态快照（UI 分步显示用） ==================== */
 
-/* 升级进度（升级页面显示用）：ota 任务写，UI 读。
-   各字段都是对齐字，无需加锁。 */
-static ota_progress_t s_prog;
+/* UI 读这份快照刷新升级页。WiFi 阶段电台等模块也会触发写，无害。 */
+static ota_state_t s_state;
 
-void ota_update_get_progress(ota_progress_t *out)
+/* 检查成功后缓存的清单，「立即升级」直接用它，不再重复联网拉一遍 */
+static ota_manifest_t s_manifest;
+static bool s_manifest_valid;
+
+/* 检查/升级任务互斥（防止连点起多个任务抢 WiFi/flash） */
+static volatile bool s_task_busy;
+
+void ota_update_get_state(ota_state_t *out)
 {
     if (out) {
-        *out = s_prog;
+        *out = s_state;
     }
 }
 
-static void prog_set(const char *stage, const char *detail)
+/** WiFi 步骤的实时文案（连哪个热点 / 是否连上） */
+static void state_wifi(const char *txt)
 {
-    strlcpy(s_prog.stage, stage, sizeof(s_prog.stage));
-    if (detail) {
-        strlcpy(s_prog.detail, detail, sizeof(s_prog.detail));
-    }
+    strlcpy(s_state.wifi_info, txt, sizeof(s_state.wifi_info));
     ui_mark_dirty();
 }
 
 /** 下载 + 写 flash + 切启动分区。成功不返回（重启）。 */
-static esp_err_t ota_perform(const ota_manifest_t *m)
+static esp_err_t ota_perform(void)
 {
     esp_http_client_config_t http_cfg = {
-        .url = m->url,
+        .url = s_manifest.url,
         .timeout_ms = 20000,
         .buffer_size = 4096,
         .keep_alive_enable = false,
@@ -372,140 +375,59 @@ static esp_err_t ota_perform(const ota_manifest_t *m)
     };
 
     esp_https_ota_handle_t h = NULL;
-    prog_set("下载中", "连接升级服务器…");
+    s_state.phase = OTA_PHASE_DOWNLOAD;
+    s_state.percent = -1;
+    ui_mark_dirty();
     esp_err_t err = esp_https_ota_begin(&ota_cfg, &h);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ota begin failed: %s", esp_err_to_name(err));
-        prog_set("失败", "连接升级服务器失败");
+        s_state.phase = OTA_PHASE_FAIL;
         return err;
     }
     /* manifest 没带 size 时，这里能拿到镜像真实大小 */
     int img_total = esp_https_ota_get_image_size(h);
     if (img_total > 0) {
-        s_prog.total_kb = img_total / 1024;
+        s_state.total_kb = img_total / 1024;
     }
 
-    /* 读到镜像头后先看一眼新固件的版本，再决定要不要继续 */
     esp_app_desc_t desc;
     while ((err = esp_https_ota_perform(h)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
         if (esp_https_ota_get_image_len_read(h) >= (int)sizeof(esp_image_header_t) + (int)sizeof(esp_image_segment_header_t) &&
             esp_https_ota_get_img_desc(h, &desc) == ESP_OK) {
             ESP_LOGI(TAG, "remote image version: %s", desc.version);
-            prog_set("下载中", desc.version);
         }
         int total = esp_https_ota_get_image_size(h);
         int read = esp_https_ota_get_image_len_read(h);
-        s_prog.total_kb = total / 1024;
-        s_prog.done_kb = read / 1024;
+        s_state.total_kb = total / 1024;
+        s_state.done_kb = read / 1024;
         if (total > 0) {
-            s_prog.percent = read * 100 / total;
-            char sub[64];
-            snprintf(sub, sizeof(sub), "下载 %d%%", s_prog.percent);
-            ui_show_action("升级中", sub);
-            power_mgr_notify_activity();   /* 别让屏幕在升级途中睡着 */
+            s_state.percent = read * 100 / total;
         }
+        power_mgr_notify_activity();   /* 别让屏幕在升级途中睡着 */
         vTaskDelay(pdMS_TO_TICKS(1));
     }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ota download failed: %s", esp_err_to_name(err));
         esp_https_ota_abort(h);
-        prog_set("失败", "下载中断，旧固件继续运行");
+        s_state.phase = OTA_PHASE_FAIL;
         return err;
     }
 
     err = esp_https_ota_finish(h);   /* 内部已做镜像校验 + set_boot_partition */
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ota finish failed: %s", esp_err_to_name(err));
-        if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
-            ESP_LOGE(TAG, "image validation failed - keeping old firmware");
-            prog_set("失败", "固件校验失败，旧固件继续运行");
-        }
+        s_state.phase = OTA_PHASE_FAIL;
         return err;
     }
     ESP_LOGI(TAG, "ota complete, boot partition switched");
-    s_prog.percent = 100;
-    prog_set("完成", "校验通过，准备重启");
+    s_state.percent = 100;
+    s_state.phase = OTA_PHASE_READY;
     return ESP_OK;
 }
 
-/** 升级任务的主体：连网 -> 比版本 -> 下载 -> 倒计时重启。
- *  自动模式下失败一律静默（不能每 30 秒骚扰一次屏幕），
- *  手动模式下失败给出屏幕提示 + 串口原因。 */
-static void ota_run(bool auto_triggered)
+/** 升级完成/失败后的 5 秒倒计时重启（只在实际写成功后调用） */
+static void ota_reboot_countdown(void)
 {
-    power_mgr_notify_activity();
-
-    /* ---- 1. 确保 WiFi 在线 ---- */
-    memset(&s_prog, 0, sizeof(s_prog));
-    if (!ota_update_wifi_connected()) {
-        prog_set("连接WiFi", "正在连接…");
-        if (!auto_triggered) {
-            ui_show_action("检查更新", "连接 WiFi 中");
-        }
-        esp_err_t e = wifi_ensure_connected();
-        if (e != ESP_OK) {
-            ESP_LOGW(TAG, "wifi connect failed: %s", esp_err_to_name(e));
-            prog_set("失败", "WiFi 连接失败");
-            if (!auto_triggered) {
-                ui_show_action("检查更新失败",
-                               e == ESP_ERR_INVALID_STATE ? "未配置 WiFi" : "连接超时");
-                ui_set_footer("串口: wifi set <ssid> <pass>");
-            }
-            return;
-        }
-    }
-
-    /* ---- 2. 拉取版本清单 ---- */
-    prog_set("检查清单", "获取版本信息…");
-    ota_manifest_t m;
-    esp_err_t e = manifest_fetch(&m);
-    if (e != ESP_OK) {
-        prog_set("失败", "无法获取清单");
-        if (!auto_triggered) {
-            ui_show_action("检查更新失败", "无法获取清单");
-            ui_set_footer("串口: ota url <manifest 地址>");
-        }
-        return;
-    }
-
-    /* ---- 3. 版本比较 ---- */
-    const esp_app_desc_t *cur = esp_app_get_description();
-    int cmp = semver_cmp(m.version, cur->version);
-    if (cmp <= 0) {
-        ESP_LOGI(TAG, "firmware up to date (%s)", cur->version);
-        prog_set("已是最新", cur->version);
-        if (!auto_triggered) {
-            char sub[64];
-            snprintf(sub, sizeof(sub), "当前 %s 已是最新", cur->version);
-            ui_show_action("已是最新", sub);
-        }
-        return;
-    }
-
-    char sub[64];
-    snprintf(sub, sizeof(sub), "%s -> %s", cur->version, m.version);
-    ui_show_action("发现新版本", sub);
-    ESP_LOGI(TAG, "new version available: %s -> %s", cur->version, m.version);
-    power_mgr_notify_activity();
-
-    /* manifest 里带了包大小就先亮出来，不用等下载开始才知道 */
-    if (m.size > 0) {
-        s_prog.total_kb = m.size / 1024;
-    }
-
-    /* ---- 4. 下载写入备槽 ---- */
-    if (ota_perform(&m) != ESP_OK) {
-        if (strcmp(s_prog.stage, "失败") != 0) {
-            prog_set("失败", "旧固件继续运行");
-        }
-        ui_show_action("升级失败", "旧固件继续运行");
-        ui_set_footer("原因见串口日志");
-        return;
-    }
-
-    /* ---- 5. 倒计时重启进新固件。
-            新固件启动在 PENDING_VERIFY 状态，app_main 走完才确认；
-            若新固件起不来，bootloader 自动回滚旧版本。 ---- */
     ui_show_action("升级完成", "5 秒后重启");
     for (int i = 5; i > 0; i--) {
         char s[24];
@@ -517,26 +439,146 @@ static void ota_run(bool auto_triggered)
     esp_restart();
 }
 
-static void ota_manual_task(void *arg)
+/* ==================== 第 1 步：检查（只查不升） ==================== */
+
+static void ota_check_run(bool auto_mode)
+{
+    power_mgr_notify_activity();
+
+    memset(&s_state, 0, sizeof(s_state));
+    s_state.percent = -1;
+    strlcpy(s_state.cur_version, esp_app_get_description()->version,
+            sizeof(s_state.cur_version));
+
+    /* ---- 1. WiFi：失败就停在这一步，屏上明确显示 ---- */
+    s_state.phase = OTA_PHASE_WIFI;
+    if (!ota_update_wifi_connected()) {
+        state_wifi("连接中…");
+        esp_err_t e = wifi_ensure_connected();   /* 内部逐步更新 wifi_info */
+        if (e != ESP_OK) {
+            ESP_LOGW(TAG, "wifi connect failed: %s", esp_err_to_name(e));
+            state_wifi(e == ESP_ERR_INVALID_STATE ? "未配置（串口 wifi set）" : "连接失败");
+            s_state.phase = OTA_PHASE_FAIL;
+            if (auto_mode) {
+                return;   /* 自动检查静默失败，不骚扰屏幕 */
+            }
+            ui_show_action("WiFi 未连上", "检查路由器或稍后再试");
+            return;
+        }
+    }
+
+    /* ---- 2. 版本清单：失败就停在这一步 ---- */
+    s_state.phase = OTA_PHASE_MANIFEST;
+    strlcpy(s_state.list_info, "获取中…", sizeof(s_state.list_info));
+    ui_mark_dirty();
+    esp_err_t e = manifest_fetch(&s_manifest);
+    if (e != ESP_OK) {
+        strlcpy(s_state.list_info, "获取失败", sizeof(s_state.list_info));
+        s_state.phase = OTA_PHASE_FAIL;
+        ESP_LOGW(TAG, "manifest fetch failed: %s", esp_err_to_name(e));
+        if (auto_mode) {
+            return;
+        }
+        ui_show_action("无法获取版本信息", "检查网络后重试");
+        return;
+    }
+    s_manifest_valid = true;
+    strlcpy(s_state.list_info, "已获取", sizeof(s_state.list_info));
+
+    /* ---- 3. 版本比较：只有真的有新版才进入 READY ---- */
+    const esp_app_desc_t *cur = esp_app_get_description();
+    int cmp = semver_cmp(s_manifest.version, cur->version);
+    if (cmp <= 0) {
+        ESP_LOGI(TAG, "firmware up to date (%s)", cur->version);
+        s_state.phase = OTA_PHASE_LATEST;
+        snprintf(s_state.cmp_info, sizeof(s_state.cmp_info),
+                 "已是最新(%s)", s_manifest.version);
+        if (!auto_mode) {
+            ui_show_action("已是最新版本", s_state.cmp_info);
+        }
+        return;
+    }
+
+    s_state.phase = OTA_PHASE_READY;
+    strlcpy(s_state.new_version, s_manifest.version, sizeof(s_state.new_version));
+    if (s_manifest.size > 0) {
+        s_state.total_kb = s_manifest.size / 1024;
+    }
+    snprintf(s_state.cmp_info, sizeof(s_state.cmp_info), "发现新版本 %s",
+             s_manifest.version);
+    ESP_LOGI(TAG, "new version available: %s -> %s (%d KB)",
+             cur->version, s_manifest.version, s_state.total_kb);
+    if (!auto_mode) {
+        ui_show_action("发现新版本", "点「立即升级」开始");
+    }
+    power_mgr_notify_activity();
+}
+
+/* ==================== 第 2 步：下载安装 ==================== */
+
+static void ota_download_run(void)
+{
+    if (!s_manifest_valid || s_state.phase != OTA_PHASE_READY) {
+        ESP_LOGW(TAG, "download without a READY check");
+        s_state.phase = OTA_PHASE_FAIL;
+        return;
+    }
+
+    esp_err_t err = ota_perform();
+    if (err != ESP_OK) {
+        ui_show_action("升级失败", "旧固件继续运行");
+        return;
+    }
+    /* 新固件启动在 PENDING_VERIFY 状态，app_main 走完才确认；
+       若新固件起不来，bootloader 自动回滚旧版本。 */
+    ota_reboot_countdown();
+}
+
+/* ==================== 任务入口（防重入） ==================== */
+
+static void check_task(void *arg)
 {
     (void)arg;
-    ota_run(false);
-    s_ota_running = false;
+    ota_check_run(false);
+    s_task_busy = false;
     vTaskDelete(NULL);
 }
 
-void ota_update_start_manual(void)
+static void download_task(void *arg)
 {
-    /* 防重入：连点「开始检查更新」会起多个任务同时抢 WiFi/flash，
-     * 轻则进度条乱跳，重则两个 esp_https_ota 写坏分区表。 */
-    if (s_ota_running) {
-        ESP_LOGW(TAG, "ota already running, ignore");
-        ui_show_hint("检查更新进行中");
+    (void)arg;
+    ota_download_run();
+    s_task_busy = false;
+    vTaskDelete(NULL);
+}
+
+void ota_update_check(void)
+{
+    if (s_task_busy) {
+        ESP_LOGW(TAG, "ota task busy, ignore");
+        ui_show_hint("更新任务进行中");
         return;
     }
-    s_ota_running = true;
-    if (xTaskCreate(ota_manual_task, "ota_task", OTA_TASK_STACK, NULL, 3, NULL) != pdPASS) {
-        s_ota_running = false;
+    s_task_busy = true;
+    if (xTaskCreate(check_task, "ota_chk", OTA_TASK_STACK, NULL, 3, NULL) != pdPASS) {
+        s_task_busy = false;
+    }
+}
+
+void ota_update_download(void)
+{
+    if (s_task_busy) {
+        ESP_LOGW(TAG, "ota task busy, ignore");
+        ui_show_hint("更新任务进行中");
+        return;
+    }
+    if (s_state.phase != OTA_PHASE_READY) {
+        ui_show_hint("请先检查更新");
+        return;
+    }
+    s_task_busy = true;
+    if (xTaskCreate(download_task, "ota_dl", OTA_TASK_STACK, NULL, 3, NULL) != pdPASS) {
+        s_task_busy = false;
     }
 }
 
@@ -548,8 +590,11 @@ static void auto_check_task(void *arg)
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(AUTO_CHECK_DELAY_S * 1000));
     /* 自动流程不弹错误提示（WiFi 没配好就静默跳过），只在
-       确认发现新版本时才打扰用户。 */
-    ota_run(true);
+       确认发现新版本时才打扰用户：查到 READY 就直接继续下载。 */
+    ota_check_run(true);
+    if (s_state.phase == OTA_PHASE_READY) {
+        ota_download_run();
+    }
     vTaskDelete(NULL);
 }
 #endif
@@ -604,11 +649,16 @@ static int cmd_ota(int argc, char **argv)
         return 0;
     }
     if (argc == 2 && strcmp(argv[1], "check") == 0) {
-        ota_update_start_manual();
+        ota_update_check();
         printf("check started, watch the screen / serial log\n");
         return 0;
     }
-    printf("usage: ota url <manifest-url> | ota check\n");
+    if (argc == 2 && strcmp(argv[1], "download") == 0) {
+        ota_update_download();
+        printf("download started (requires a successful check first)\n");
+        return 0;
+    }
+    printf("usage: ota url <manifest-url> | ota check | ota download\n");
     return 1;
 }
 

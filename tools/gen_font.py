@@ -54,7 +54,9 @@ def collect_chars_from_source():
     chars = set()
     for root, _dirs, files in os.walk(SRC_DIR):
         for name in files:
-            if not name.endswith((".c", ".h")):
+            # Kconfig.projbuild 里有 WiFi 热点名（如「九天诛仙」），
+            # 不扫它屏上显示 SSID 就全是问号
+            if not name.endswith((".c", ".h", ".json")) and name != "Kconfig.projbuild":
                 continue
             path = os.path.join(root, name)
             if os.path.abspath(path) == os.path.abspath(os.path.join(OUT_DIR, "ui_font.c")):
@@ -66,6 +68,15 @@ def collect_chars_from_source():
                     cp = ord(ch)
                     if any(lo <= cp <= hi for lo, hi in CJK_RANGES):
                         chars.add(ch)
+    # 仓库根目录的电台台列表 JSON：屏上要显示台名（中文），
+    # 台名是运行时从网络拉的，只有扫这个文件才能进字库
+    radio_json = os.path.join(PROJECT, "radio", "radio_stations.json")
+    if os.path.isfile(radio_json):
+        with open(radio_json, encoding="utf-8", errors="ignore") as fh:
+            for ch in fh.read():
+                cp = ord(ch)
+                if any(lo <= cp <= hi for lo, hi in CJK_RANGES):
+                    chars.add(ch)
     return chars
 
 # ASCII 全量 0x20~0x7E，保证固件侧可直接下标寻址

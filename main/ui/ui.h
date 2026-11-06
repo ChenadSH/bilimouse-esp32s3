@@ -104,7 +104,8 @@ typedef enum {
     UI_BTN_CAL_PREV,         /* 校准：上一集 */
     UI_BTN_CAL_EXIT,         /* 校准：完成 */
     /* 升级页 */
-    UI_BTN_OTA_START,        /* 开始检查/升级 */
+    UI_BTN_OTA_START,        /* 开始检查更新（只查不升） */
+    UI_BTN_OTA_DOWNLOAD,     /* 立即升级（检测到新版本后才出现） */
     UI_BTN_MAX
 } ui_button_t;
 

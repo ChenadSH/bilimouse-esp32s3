@@ -32,14 +32,31 @@
 extern "C" {
 #endif
 
-/** 升级进度快照（升级页面显示用） */
+/** 升级流程阶段（两段式：先「检查」，检测到新版本才允许「升级」） */
+typedef enum {
+    OTA_PHASE_IDLE = 0,     /* 未检查 */
+    OTA_PHASE_WIFI,         /* 正在连 WiFi */
+    OTA_PHASE_MANIFEST,     /* 正在获取版本清单 */
+    OTA_PHASE_READY,        /* 发现新版本，等待用户点「立即升级」 */
+    OTA_PHASE_LATEST,       /* 已是最新 */
+    OTA_PHASE_DOWNLOAD,     /* 下载写入中 */
+    OTA_PHASE_FAIL,         /* 某一步失败 */
+} ota_phase_t;
+
+/** 检查/升级状态快照（升级任务后台写，UI 读）。
+ *  屏幕按「WiFi / 清单 / 版本」三行分步显示，每一步成功失败一目了然，
+ *  不再是按了按钮就黑盒卡住。 */
 typedef struct {
-    char stage[24];    /* 空闲/连接WiFi/检查清单/下载中/失败/完成 */
-    char detail[48];   /* 补充说明（版本号/失败原因） */
-    int  percent;      /* 0..100，未知为 -1 */
-    int  total_kb;     /* OTA 包总大小（KB），未知为 0 */
-    int  done_kb;      /* 已下载（KB） */
-} ota_progress_t;
+    ota_phase_t phase;
+    char wifi_info[36];     /* 第1步结果：正在连 <SSID> / 已连 <SSID> / 失败原因 */
+    char list_info[36];     /* 第2步结果：获取中… / 已获取 / 获取失败 */
+    char cmp_info[48];      /* 第3步结果：已是最新(服务器版本) / 发现新版本 */
+    char cur_version[24];   /* 当前固件版本 */
+    char new_version[24];   /* 服务器新版本（仅在 READY 时有效） */
+    int  total_kb;          /* OTA 包总大小（KB），未知为 0 */
+    int  done_kb;           /* 已下载（KB） */
+    int  percent;           /* 0..100，下载中有效，未知为 -1 */
+} ota_state_t;
 
 /** 初始化 WiFi 子系统（不连接，连接在首次需要时发生）。幂等。 */
 esp_err_t ota_update_init(void);
@@ -50,14 +67,17 @@ bool ota_update_wifi_connected(void);
 /** 阻塞确保 WiFi 在线（未连则按凭据序列尝试）。电台等模块共用。 */
 esp_err_t ota_update_wifi_online(void);
 
-/** 读取升级进度（升级任务在后台写，这里拷一份快照） */
-void ota_update_get_progress(ota_progress_t *out);
+/** 读取检查/升级状态快照 */
+void ota_update_get_state(ota_state_t *out);
 
 /**
- * 手动升级入口（屏幕「升级」按钮）：独立任务里执行
- * 连 WiFi -> 查 manifest -> 有新版就下载安装 -> 倒计时重启。
+ * 第 1 步：开始检查更新（独立任务：连 WiFi -> 拉清单 -> 比版本）。
+ * 只查不升 —— 检测到新版本后停在 OTA_PHASE_READY，等用户点「立即升级」。
  */
-void ota_update_start_manual(void);
+void ota_update_check(void);
+
+/** 第 2 步：下载并安装已检测到的新版本（须先 ota_update_check 到 READY） */
+void ota_update_download(void);
 
 #ifdef __cplusplus
 }

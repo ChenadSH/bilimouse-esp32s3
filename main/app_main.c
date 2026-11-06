@@ -233,9 +233,12 @@ static void on_ui_button(ui_button_t btn, void *ctx)
         break;
     case UI_BTN_OTA_START:
         enter_ota_page();
-        ui_show_action("检查更新", "正在准备 WiFi");
-        ui_set_footer("结果看屏幕/串口，全程别断电");
-        ota_update_start_manual();
+        /* 两段式：先只做「检查」（WiFi/清单/版本 三步逐步显示），
+           检测到新版本后屏上才会出现「立即升级」按钮 */
+        ota_update_check();
+        break;
+    case UI_BTN_OTA_DOWNLOAD:
+        ota_update_download();
         break;
 
     /* 电台模式 */

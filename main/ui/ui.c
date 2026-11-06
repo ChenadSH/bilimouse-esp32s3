@@ -145,12 +145,19 @@ static const btn_def_t s_rlist_btns[] = {
 
 #define RLIST_BTN_CNT (sizeof(s_rlist_btns) / sizeof(s_rlist_btns[0]))
 
-/* 升级页 */
+/* 升级页：两个按钮并排。「立即升级」只在检查到新版本后绘制/可点，
+   严格执行「检测到新版本才能更新」。 */
 static const btn_def_t s_ota_btns[] = {
-    { UI_BTN_OTA_START,    6, 168, 308, 40, "开始检查更新", COL_ACCENT },
+    { UI_BTN_OTA_START,      6, 168, 148, 40, "开始检查更新", COL_ACCENT },
 };
 
-#define OTA_BTN_CNT (sizeof(s_ota_btns) / sizeof(s_ota_btns[0]))
+static const btn_def_t s_ota_btns_ready[] = {
+    { UI_BTN_OTA_START,      6, 168, 148, 40, "开始检查更新", COL_ACCENT },
+    { UI_BTN_OTA_DOWNLOAD, 164, 168, 150, 40, "立即升级",     COL_OK },
+};
+
+#define OTA_BTN_CNT       (sizeof(s_ota_btns) / sizeof(s_ota_btns[0]))
+#define OTA_BTN_READY_CNT (sizeof(s_ota_btns_ready) / sizeof(s_ota_btns_ready[0]))
 
 /* 校准模式按钮：两个大按钮 + 一个完成。
    完成按钮必须完整落在底栏(218)之上。 */
@@ -607,42 +614,75 @@ static void draw_radio_list(void)
 
 /* ==================== 升级页 ==================== */
 
+/** 画一行「步骤名 + 结果」，颜色按成功/失败/进行中区分 */
+static void ota_step_row(int y, const char *name, const char *result, int color)
+{
+    draw_text(16, y, name, COL_TEXT, 70);
+    draw_text(86, y, result, color, 220);
+}
+
 static void draw_ota_page(void)
 {
     const esp_app_desc_t *app = esp_app_get_description();
-    ota_progress_t p;
-    ota_update_get_progress(&p);
+    ota_state_t st;
+    ota_update_get_state(&st);
 
-    fill_round_rect(6, 32, 308, 128, 8, COL_PANEL);
+    fill_round_rect(6, 32, 308, 126, 8, COL_PANEL);
 
     char line[96];
     snprintf(line, sizeof(line), "当前版本: %.40s", app->version);
     draw_text(16, 42, line, COL_TEXT, 290);
 
-    snprintf(line, sizeof(line), "状态: %.20s %.36s", p.stage, p.detail);
-    draw_text(16, 64, line, strcmp(p.stage, "失败") == 0 ? COL_ERR : COL_SUBTEXT, 290);
-
-    /* 进度条 */
-    draw_frame(16, 92, 288, 18, 2, COL_ACCENT);
-    if (p.percent > 0) {
-        fill_rect(18, 94, (int)(284 * (p.percent < 100 ? p.percent : 100)) / 100, 14, COL_ACCENT);
+    /* 步骤 1：WiFi —— 失败红、成功绿、没查过灰 */
+    int wifi_col = COL_SUBTEXT;
+    if (st.phase == OTA_PHASE_FAIL && strstr(st.wifi_info, "失败")) {
+        wifi_col = COL_ERR;
+    } else if (st.phase != OTA_PHASE_IDLE && st.phase != OTA_PHASE_WIFI) {
+        wifi_col = COL_OK;
+    } else if (st.phase == OTA_PHASE_WIFI) {
+        wifi_col = COL_WARN;
     }
-    if (p.percent >= 0) {
-        snprintf(line, sizeof(line), "%d%%", p.percent);
-    } else {
-        strlcpy(line, "--%", sizeof(line));
-    }
-    draw_text(148, 114, line, COL_TEXT, 60);
+    ota_step_row(64, "WiFi:", st.wifi_info[0] ? st.wifi_info : "未检查", wifi_col);
 
-    if (p.total_kb > 0) {
-        snprintf(line, sizeof(line), "升级包: %d KB / 已下载 %d KB",
-                 p.total_kb, p.done_kb);
-        draw_text(16, 136, line, COL_SUBTEXT, 290);
-    } else {
-        draw_text(16, 136, "升级包大小在检查更新后显示", COL_SUBTEXT, 290);
+    /* 步骤 2：版本清单 */
+    int list_col = COL_SUBTEXT;
+    if (strcmp(st.list_info, "获取失败") == 0) {
+        list_col = COL_ERR;
+    } else if (strcmp(st.list_info, "已获取") == 0) {
+        list_col = COL_OK;
+    } else if (st.phase == OTA_PHASE_MANIFEST) {
+        list_col = COL_WARN;
+    }
+    ota_step_row(84, "清单:", st.list_info[0] ? st.list_info : "未检查", list_col);
+
+    /* 步骤 3：版本比较结果 */
+    int cmp_col = COL_SUBTEXT;
+    if (st.phase == OTA_PHASE_READY) {
+        cmp_col = COL_WARN;
+    } else if (st.phase == OTA_PHASE_LATEST) {
+        cmp_col = COL_OK;
+    } else if (st.phase == OTA_PHASE_FAIL) {
+        cmp_col = COL_ERR;
+    }
+    const char *cmp_txt = st.cmp_info[0] ? st.cmp_info : "未检查";
+    ota_step_row(104, "版本:", cmp_txt, cmp_col);
+
+    /* 下载进度条（仅下载阶段显示） */
+    if (st.phase == OTA_PHASE_DOWNLOAD && st.percent >= 0) {
+        draw_frame(16, 128, 288, 16, 2, COL_ACCENT);
+        fill_rect(18, 130, (int)(284 * (st.percent < 100 ? st.percent : 100)) / 100, 12, COL_ACCENT);
+        snprintf(line, sizeof(line), "下载 %d%%  %d/%d KB",
+                 st.percent, st.done_kb, st.total_kb);
+        draw_text(16, 148, line, COL_TEXT, 290);
+    } else if (st.phase == OTA_PHASE_READY && st.total_kb > 0) {
+        snprintf(line, sizeof(line), "升级包: %d KB", st.total_kb);
+        draw_text(16, 130, line, COL_SUBTEXT, 290);
+    } else if (st.phase == OTA_PHASE_FAIL) {
+        draw_text(16, 130, "失败不影响当前使用，可重试", COL_SUBTEXT, 290);
     }
 
-    draw_btn_group(s_ota_btns, OTA_BTN_CNT);
+    draw_btn_group(st.phase == OTA_PHASE_READY ? s_ota_btns_ready : s_ota_btns,
+                   st.phase == OTA_PHASE_READY ? OTA_BTN_READY_CNT : OTA_BTN_CNT);
 }
 
 /* ==================== 触摸校准界面 ==================== */
@@ -813,6 +853,12 @@ ui_button_t ui_hit_test(uint16_t x, uint16_t y)
         return hit_group(s_rlist_btns, RLIST_BTN_CNT, x, y);
     }
     if (s_mode == UI_MODE_OTA_PAGE) {
+        /* 「立即升级」只在检测到新版本后出现，命中区跟着收放 */
+        ota_state_t st;
+        ota_update_get_state(&st);
+        if (st.phase == OTA_PHASE_READY) {
+            return hit_group(s_ota_btns_ready, OTA_BTN_READY_CNT, x, y);
+        }
         return hit_group(s_ota_btns, OTA_BTN_CNT, x, y);
     }
     /* 鼠标模式：左右按键优先，其余区域都是触控板 */

@@ -40,14 +40,23 @@
 
 static const char *TAG = "radio";
 
-/* 台列表：仓库 master 分支，永远最新（想加台改文件提交即可，不用烧固件） */
-#define RADIO_LIST_URL \
-    "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/master/radio/radio_stations.json"
+/* 台列表：仓库 master 分支，永远最新（想加台改文件提交即可，不用烧固件）。
+   多源容灾：raw.githubusercontent.com 在国内时常连不上，
+   jsdelivr 是 GitHub 内容的国内可达 CDN，逐个试直到成功。 */
+static const char *s_radio_list_urls[] = {
+    "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/master/radio/radio_stations.json",
+    "https://cdn.jsdelivr.net/gh/ChenadSH/bilimouse-esp32s3@master/radio/radio_stations.json",
+    "https://fastly.jsdelivr.net/gh/ChenadSH/bilimouse-esp32s3@master/radio/radio_stations.json",
+};
+#define RADIO_LIST_URL_CNT  (sizeof(s_radio_list_urls) / sizeof(s_radio_list_urls[0]))
 
 #define BUF_CAP      (32 * 1024)
 #define HIGH_WATER   (BUF_CAP - 8 * 1024)   /* 高于此值暂停网络读 */
 #define DECODE_MIN   2048                    /* 至少攒这么多再解码 */
 #define READ_CHUNK   4096
+/* 拉列表任务堆栈：任务是 HTTPS（mbedtls 握手要 6~8KB），5KB 会栈溢出。
+   之前「台列表读不到/进电台就崩」的帮凶之一。 */
+#define RADIO_LIST_STACK  (10 * 1024)
 
 /* ==================== 状态 ==================== */
 
@@ -191,10 +200,10 @@ static esp_err_t parse_stations(char *body)
     return s_cnt ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
-static esp_err_t radio_fetch_list(void)
+static esp_err_t radio_fetch_list_one(const char *url)
 {
     esp_http_client_config_t cfg = {
-        .url = RADIO_LIST_URL,
+        .url = url,
         .timeout_ms = 8000,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
@@ -231,8 +240,24 @@ static esp_err_t radio_fetch_list(void)
         ESP_LOGW(TAG, "station list empty (http %d)", code);
         return ESP_ERR_NOT_FOUND;
     }
-    ESP_LOGI(TAG, "station list: %d bytes, http %d", n, code);
-    return parse_stations(body);}
+    ESP_LOGI(TAG, "station list: %d bytes, http %d (%s)", n, code, url);
+    return parse_stations(body);
+}
+
+/** 依次尝试所有镜像源，任一成功即可 */
+static esp_err_t radio_fetch_list(void)
+{
+    esp_err_t err = ESP_FAIL;
+    for (size_t i = 0; i < RADIO_LIST_URL_CNT; i++) {
+        err = radio_fetch_list_one(s_radio_list_urls[i]);
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "list source %u failed (%s), trying next",
+                 (unsigned)i, esp_err_to_name(err));
+    }
+    return err;
+}
 
 /* ==================== 播放源（MP3 直连 / HLS） ==================== */
 
@@ -581,10 +606,12 @@ static play_result_t play_station(int idx)
     return result;
 }
 
+/* 前向声明：radio_task 里列表未就绪时自动重拉 */
+static void fetch_list_task(void *arg);
+
 static void radio_task(void *arg)
 {
     (void)arg;
-
     for (;;) {
         radio_req_t req = s_req;
         if (req == REQ_NONE) {
@@ -604,7 +631,10 @@ static void radio_task(void *arg)
 
         /* REQ_TOGGLE */
         if (!s_list_loading && s_cnt == 0) {
-            show_station("台列表未就绪，重进电台或 radio update");
+            /* 列表没拿到（首次拉取失败也走到这）：自动重拉一次，
+               不让用户被迫「重进电台页」。 */
+            show_station("列表未就绪，自动重拉…");
+            xTaskCreate(fetch_list_task, "radio_list", RADIO_LIST_STACK, NULL, 3, NULL);
             continue;
         }
         if (s_cnt == 0) {
@@ -690,7 +720,7 @@ void radio_enter(void)
         }
     }
     if (!s_list_loading && s_cnt == 0) {
-        xTaskCreate(fetch_list_task, "radio_list", 5120, NULL, 3, NULL);
+        xTaskCreate(fetch_list_task, "radio_list", RADIO_LIST_STACK, NULL, 3, NULL);
     }
     show_station(s_cnt ? s_status : "拉取台列表中…");
 }
@@ -785,7 +815,7 @@ static int cmd_radio(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "update") == 0) {
         s_cnt = 0;
         s_cur = 0;
-        xTaskCreate(fetch_list_task, "radio_list", 5120, NULL, 3, NULL);
+        xTaskCreate(fetch_list_task, "radio_list", RADIO_LIST_STACK, NULL, 3, NULL);
         printf("refreshing station list...\n");
         return 0;
     }
