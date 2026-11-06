@@ -82,13 +82,17 @@ def main():
     subprocess.run(["git", "commit", "-m", f"release: v{ver}"], cwd=ROOT)
     run(["git", "push", "origin", "master"])
 
-    # 3. 编译（build.bat 在部分终端环境下即使编译成功也返回 1，
-    #    所以这里不看退出码，以 bilimouse.bin 是否刷新为准）
-    before = BIN.stat().st_mtime if BIN.exists() else 0
-    subprocess.run(["cmd", "/c", str(ROOT / "tools" / "build.bat"), str(ROOT), "build"])
-    if not BIN.exists() or BIN.stat().st_mtime <= before:
-        sys.exit("error: build failed (bilimouse.bin not refreshed)")
-    print(f"bin refreshed: {BIN.stat().st_size} bytes")
+    # 3. 编译：直接 call env.bat + idf.py，退出码可靠
+    #    （build.bat 在部分终端下即使成功也返回 1；且增量编译不刷新
+    #    bilimouse.bin，不能拿文件时间当成功依据）
+    build_cmd = ('call "{}" && cd /d "{}" && python "%IDF_PATH%\\tools\\idf.py" build'
+                 .format(ROOT / "tools" / "env.bat", ROOT))
+    r = subprocess.run(["cmd", "/c", build_cmd], cwd=ROOT)
+    if r.returncode != 0:
+        sys.exit(f"error: idf.py build failed ({r.returncode})")
+    if not BIN.exists():
+        sys.exit("error: build/bilimouse.bin 不存在")
+    print(f"bin ok: {BIN.stat().st_size} bytes")
 
     # 4. 创建 release（tag 自动打在远端 master HEAD）
     rel = api("POST", f"https://api.github.com/repos/{REPO}/releases", token, {
