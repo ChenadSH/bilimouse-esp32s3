@@ -82,13 +82,17 @@ def main():
     subprocess.run(["git", "commit", "-m", f"release: v{ver}"], cwd=ROOT)
     run(["git", "push", "origin", "master"])
 
-    # 3. 编译：直接 call env.bat + idf.py，退出码可靠
-    #    （build.bat 在部分终端下即使成功也返回 1；且增量编译不刷新
-    #    bilimouse.bin，不能拿文件时间当成功依据。
-    #    注意 cmd /c 的引号转义很怪，路径无空格时干脆不加引号）
-    build_cmd = ('call {}\\tools\\env.bat && cd /d {} && '
-                 'python "%IDF_PATH%\\tools\\idf.py" build').format(ROOT, ROOT)
-    r = subprocess.run(["cmd", "/c", build_cmd], cwd=ROOT)
+    # 3. 编译：解析 tools/env.bat 构造环境后直接跑 idf.py。
+    #    不经过 cmd 一行链（%IDF_PATH% 会在 env.bat 生效前被展开），
+    #    也不用 build.bat（部分终端下成功也返回 1）。
+    env = os.environ.copy()
+    for m in re.finditer(r'^set\s+"?(\w+)=(.*?)"?\s*$',
+                         (ROOT / "tools" / "env.bat").read_text(encoding="utf-8"),
+                         re.M):
+        env[m.group(1)] = m.group(2).replace("%PATH%", env.get("PATH", ""))
+    py = Path(env["IDF_PYTHON_ENV_PATH"]) / "Scripts" / "python.exe"
+    idf_py = Path(env["IDF_PATH"]) / "tools" / "idf.py"
+    r = subprocess.run([str(py), str(idf_py), "build"], cwd=ROOT, env=env)
     if r.returncode != 0:
         sys.exit(f"error: idf.py build failed ({r.returncode})")
     if not BIN.exists():
