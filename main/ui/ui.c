@@ -952,6 +952,11 @@ bool ui_mode_is_home(void)
     return s_mode == UI_MODE_HOME;
 }
 
+bool ui_mode_uses_pointer_click(void)
+{
+    return s_mode == UI_MODE_REMOTE || s_mode == UI_MODE_MOUSE;
+}
+
 /* ==================== 首页轮播 ==================== */
 
 int ui_home_page(void)

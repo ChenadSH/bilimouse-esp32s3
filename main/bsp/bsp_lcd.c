@@ -86,7 +86,12 @@ esp_err_t bsp_lcd_init(bsp_lcd_t *lcd)
         .dc_gpio_num = BSP_LCD_PIN_DC,
         .spi_mode = 0,
         .pclk_hz = 40 * 1000 * 1000,
-        .trans_queue_depth = 10,
+        /* ⚠️ 必须 0（同步发送）：>0 时 esp_lcd 走 spi_device_queue_trans，
+           draw_bitmap 立即返回而 DMA 还在后台读帧缓冲 —— UI 任务紧接着
+           画下一帧会改写还没传完的数据，屏幕撕裂花屏（电台页整帧背景图
+           高频重绘时最明显）。同步模式下每条 4 行只有 ~100us 阻塞，
+           一帧 60 条共几毫秒，20fps 完全够。 */
+        .trans_queue_depth = 0,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
     };

@@ -178,6 +178,37 @@ static void ir_learn_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/**
+ * 启动学习任务。
+ *
+ * ⚠️ 任务栈必须放内部 RAM：学习结束的 bank_save 会写 NVS（flash），
+ * flash 写入期间 cache 被挂起，PSRAM 栈的任务此时访问自己的栈会直接
+ * 崩溃（radio 那种纯网络任务才能放心用 xTaskCreateWithCaps）。
+ *
+ * 内部 RAM 被 WiFi(~45KB)+蓝牙(~60KB)+LCD DMA 吃得只剩几 KB 时，
+ * xTaskCreate 可能失败——之前就是这里静默失败，点「学习」毫无反应，
+ * 看起来像红外坏了。失败必须让用户看见。
+ */
+static void ir_learn_start(void)
+{
+    if (s_ir_learning) {
+        return;
+    }
+    /* 按下先给即时反馈（任务起来后会把卡片刷成「学习中」） */
+    ui_show_action("红外学习", "准备中…");
+
+    TaskHandle_t h = NULL;
+    if (xTaskCreate(ir_learn_task, "ir_learn", 6144, NULL, 3, &h) != pdPASS) {
+        /* 6KB 分不出（内部碎片）就退到 4KB：学习路径栈峰值实测 ~3KB，
+           宁可紧凑也不能让红外完全用不了 */
+        if (xTaskCreate(ir_learn_task, "ir_learn", 4096, NULL, 3, &h) != pdPASS) {
+            ui_show_action("红外启动失败", "内存不足，稍后再试");
+            ESP_LOGE("app_main", "ir learn task create failed");
+            return;
+        }
+    }
+}
+
 static void enter_ir_mode(void)
 {
     hid_mouse_release_all();
@@ -260,7 +291,9 @@ static void on_ui_button(ui_button_t btn, void *ctx)
         ui_show_action("电台", "已返回");
         break;
 
-    /* 台列表点行选台（UI_BTN_RADIO_PICK0..7） */
+    /* 台列表点行选台（UI_BTN_RADIO_PICK0..7）：
+       留在列表页，让用户看到高亮行 + 「播放中」箭头，确认选台成功。
+       （之前点完直接跳回电台主页，看起来像「选第一个就被弹出去」。） */
     case UI_BTN_RADIO_PICK0:
     case UI_BTN_RADIO_PICK1:
     case UI_BTN_RADIO_PICK2:
@@ -270,15 +303,14 @@ static void on_ui_button(ui_button_t btn, void *ctx)
     case UI_BTN_RADIO_PICK6:
     case UI_BTN_RADIO_PICK7:
         radio_select(btn - UI_BTN_RADIO_PICK0);
-        ui_set_mode(UI_MODE_RADIO);
         break;
 
     /* 红外模式 */
     case UI_BTN_IR_LEARN:
         if (!ir_remote_ready()) {
             ui_show_action("红外不可用", "检查 GPIO10/11");
-        } else if (!s_ir_learning) {
-            xTaskCreate(ir_learn_task, "ir_learn", 4096, NULL, 3, NULL);
+        } else {
+            ir_learn_start();
         }
         break;
 
@@ -652,10 +684,11 @@ static void touch_task(void *arg)
                         /* 点击了按钮：执行对应动作 */
                         on_ui_button(pressed_btn, NULL);
                     }
-                } else if (moved < 12 && (now - press_ms) < 400) {
-                    /* 轻点空白处 = 左键单击（鼠标/遥控模式都生效）。
-                       快速点两下 = 双击：由主机在系统双击窗口内自动判定，
-                       固件只管把两次干净的 down/up 发出去。 */
+                } else if (moved < 12 && (now - press_ms) < 400 &&
+                           ui_mode_uses_pointer_click()) {
+                    /* 轻点空白处 = 左键单击。
+                       只在 B 站控制页和鼠标模式生效：电台/红外/OTA 页面上
+                       误触空白处不该把动作卡片刷成「点击/已执行」。 */
                     perform_action(ACTION_CLICK_LEFT);
                 }
                 on_button = false;

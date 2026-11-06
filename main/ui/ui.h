@@ -127,6 +127,11 @@ void ui_set_mode(ui_mode_t mode);
 /** 当前模式是否为首页（触摸任务判断滑动/点击语义用） */
 bool ui_mode_is_home(void);
 
+/** 当前模式是否把「空白处轻点」当主机左键（仅 B 站控制页/鼠标模式）。
+    电台、红外、OTA 等页面轻点空白处不应触发主机点击，
+    否则动作卡片会被「点击/已执行」莫名刷掉。 */
+bool ui_mode_uses_pointer_click(void);
+
 /* ---- 首页轮播 ---- */
 int  ui_home_page(void);        /* 当前页 0..page_count-1 */
 int  ui_home_page_count(void);

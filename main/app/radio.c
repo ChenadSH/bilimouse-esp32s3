@@ -58,11 +58,12 @@ static const char *s_radio_list_urls[] = {
  * 反应，看起来就是坏了。内置台让电台永远有东西可播：连不上网时它会明确
  * 报「WiFi 没连上」，而不是装作在拉列表。
  *
- * 三个都是 CNR 官方 HLS 源，HTTP 明文（不依赖证书 / 系统时间）。 */
+ * ⚠️ 必须是 MP3 直播流：CNR 的 m3u8 是 AAC 编码，Helix 只能解 MP3，
+ * 放 HLS 进来只会弹「可能不是 MP3 编码」。以下三个源都实测 audio/mpeg。 */
 static const radio_station_t s_default_stations[] = {
-    { "中国之声", "http://satellitepull.cnr.cn/live/wxzgzs/playlist.m3u8" },
-    { "经济之声", "http://satellitepull.cnr.cn/live/wxjjzs/playlist.m3u8" },
-    { "音乐之声", "http://satellitepull.cnr.cn/live/wxyyzs/playlist.m3u8" },
+    { "中国之声",   "https://lhttp.qtfm.cn/live/15318317/64k.mp3" },
+    { "上海动感101", "http://lhttp.qingting.fm/live/274/64k.mp3" },
+    { "广东音乐之声", "https://lhttp.qtfm.cn/live/1260/64k.mp3" },
 };
 #define DEFAULT_ST_CNT  (sizeof(s_default_stations) / sizeof(s_default_stations[0]))
 
@@ -415,7 +416,9 @@ static esp_err_t src_open(src_t *s, const char *url)
     if (!s->hls) {
         esp_http_client_config_t cfg = {
             .url = url,
-            .timeout_ms = 1000,   /* 流读取短超时，保证及时响应停播 */
+            /* 蜻蜓的 HTTPS 握手可能超过 1s：之前 timeout 1000ms 连接
+               直接失败，表现为「连接失败」。3s 兼顾握手与停播响应。 */
+            .timeout_ms = 3000,
             .buffer_size = 4096,
             .keep_alive_enable = false,
             .crt_bundle_attach = esp_crt_bundle_attach,
@@ -618,7 +621,7 @@ static play_result_t play_station(int idx)
             }
             if (++err_runs > 4000) {
                 set_status("解码失败");
-                ui_show_action(title, "这个台可能不是 MP3 编码");
+                ui_show_action(title, "流不是 MP3 编码，试试其他台");
                 result = PLAY_ERROR;
                 break;
             }
@@ -699,6 +702,18 @@ static void radio_task(void *arg)
             }
             if (s_cnt <= 0) {
                 show_station("没有可用的台");
+                continue;
+            }
+        }
+
+        /* ⚠️ 播放前先确保 WiFi 在线（幂等，已连则立即返回）：
+           没网时 MP3 流必然「连接失败」，先建网再播，状态条同步显示进度 */
+        if (!ota_update_wifi_connected()) {
+            set_status("连接 WiFi…");
+            show_station("先连 WiFi，连上就播");
+            if (ota_update_wifi_online() != ESP_OK) {
+                set_status("WiFi 未连上");
+                show_station("连不上 WiFi，检查热点后重试");
                 continue;
             }
         }
