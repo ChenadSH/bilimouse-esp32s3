@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.16)
 
 # 固件版本号：OTA 升级用它和服务器 manifest 里的 version 比较。
 # 发布新版本时改这里，保持和 docs/OTA.md 的发布流程一致。
-set(PROJECT_VER "2.6.8")
+set(PROJECT_VER "2.6.9")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 

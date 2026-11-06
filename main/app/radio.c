@@ -29,6 +29,7 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 
 #include "bsp_audio.h"
@@ -663,6 +664,9 @@ static play_result_t play_station(int idx)
 
 /* 前向声明：radio_task 里列表未就绪时自动重拉 */
 static void fetch_list_task(void *arg);
+static BaseType_t radio_task_create(TaskFunction_t fn, const char *name,
+                                   uint32_t stack, void *arg,
+                                   UBaseType_t prio, TaskHandle_t *out);
 
 static void radio_task(void *arg)
 {
@@ -691,7 +695,7 @@ static void radio_task(void *arg)
                拉到了再无缝替换。用户不再需要「重进电台页」。 */
             seed_defaults();
             if (!s_list_loading) {
-                xTaskCreate(fetch_list_task, "radio_list", RADIO_LIST_STACK, NULL, 3, NULL);
+                radio_task_create(fetch_list_task, "radio_list", RADIO_LIST_STACK, NULL, 3, NULL);
             }
             if (s_cnt <= 0) {
                 show_station("没有可用的台");
@@ -720,10 +724,28 @@ static void radio_task(void *arg)
 
 /* ==================== 对外接口 ==================== */
 
+/**
+ * 电台任务的栈统一放 PSRAM。
+ *
+ * WiFi(~45KB)+蓝牙(~60KB)+LCD DMA 私有缓冲全在场后，内部 RAM 只剩
+ * 几 KB（最大块 4KB），8K/10K 的内部栈根本分不出来 —— 表现为
+ * 「radio buffers alloc failed」「列表永远拉不到」「点了没声」。
+ * 这两个任务只做 HTTP/TLS + MP3 解码 + I2S 写，不碰 flash 写操作，
+ * 栈放 PSRAM 完全安全；退出时 xTaskCreateWithCaps 配对的
+ * vTaskDeleteWithCaps 会把 PSRAM 栈回收。
+ */
+static inline BaseType_t radio_task_create(TaskFunction_t fn, const char *name,
+                                           uint32_t stack, void *arg,
+                                           UBaseType_t prio, TaskHandle_t *out)
+{
+    return xTaskCreateWithCaps(fn, name, stack, arg, prio, out,
+                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
 static void ensure_task(void)
 {
     if (!s_task) {
-        xTaskCreate(radio_task, "radio", 8192, NULL, 4, &s_task);
+        radio_task_create(radio_task, "radio", 8192, NULL, 4, &s_task);
     }
 }
 
@@ -739,7 +761,7 @@ static void fetch_list_task(void *arg)
         set_status("WiFi 未连上");
         ui_show_action("电台", "WiFi 连接失败");
         s_list_loading = false;
-        vTaskDelete(NULL);
+        vTaskDeleteWithCaps(NULL);
         return;
     }
 
@@ -757,7 +779,7 @@ static void fetch_list_task(void *arg)
         set_status("在线列表失败，用内置台");
         show_station("在线列表获取失败，内置台可直接播");
     }
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);
 }
 
 void radio_enter(void)
@@ -765,8 +787,16 @@ void radio_enter(void)
     ensure_task();
     if (!s_buf) {
         s_buf = heap_caps_malloc(BUF_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        /* PCM 只是 i2s_channel_write 的**源**缓冲，I2S 驱动会把它拷进自己
+           的内部 DMA 缓冲，所以这块不需要内部 RAM。放 PSRAM 可以省下
+           4.6KB 内部 RAM —— 内部最大块只剩 4KB 时（WiFi+蓝牙+LCD DMA
+           私有缓冲全在场），放内部会直接分配失败：radio buffers alloc failed。 */
         s_pcm = heap_caps_malloc(1152 * 2 * sizeof(int16_t),
-                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_pcm) {   /* PSRAM 异常时退回内部，能用总比不能用强 */
+            s_pcm = heap_caps_malloc(1152 * 2 * sizeof(int16_t),
+                                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        }
         if (!s_buf || !s_pcm) {
             ESP_LOGE(TAG, "radio buffers alloc failed");
             return;
@@ -785,7 +815,7 @@ void radio_enter(void)
     }
     /* 每次都刷新一次在线列表（拿到就替换内置台，拿不到保留内置台） */
     if (!s_list_loading) {
-        xTaskCreate(fetch_list_task, "radio_list", RADIO_LIST_STACK, NULL, 3, NULL);
+        radio_task_create(fetch_list_task, "radio_list", RADIO_LIST_STACK, NULL, 3, NULL);
     }
     show_station(s_status[0] ? s_status : "待播放");
 }
@@ -881,7 +911,7 @@ static int cmd_radio(int argc, char **argv)
         /* 不要把 s_cnt 清零：清 0 期间正在播放的任务会算 s_cur % 0。
            新列表解析成功后整体替换，失败则保留现有（内置）台。 */
         if (!s_list_loading) {
-            xTaskCreate(fetch_list_task, "radio_list", RADIO_LIST_STACK, NULL, 3, NULL);
+            radio_task_create(fetch_list_task, "radio_list", RADIO_LIST_STACK, NULL, 3, NULL);
         }
         printf("refreshing station list...\n");
         return 0;
