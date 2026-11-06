@@ -98,14 +98,33 @@ def parse_ui_layout():
             label = parts[5].strip().strip('"')
             btns.append((x, y, w, h, label))
         groups[key] = btns
-    return groups
+    return groups, defines
+
+
+def parse_emoji():
+    """读 ui_emoji.c 的 6 个 emoji 位图与磁贴底色（首页预览要用真像素）。"""
+    head = open(os.path.join(PROJECT, "main", "ui", "ui_emoji.h"),
+                encoding="utf-8").read()
+    size = int(re.search(r"#define\s+UI_EMOJI_SZ\s+(\d+)", head).group(1))
+    src = open(os.path.join(PROJECT, "main", "ui", "ui_emoji.c"),
+               encoding="utf-8").read()
+
+    def arr(name):
+        m = re.search(re.escape(name) + r"\[[^\]]*\]\s*=\s*\{(.*?)\};", src, re.S)
+        if not m:
+            return []
+        return [int(x, 16) for x in re.findall(r"0x([0-9A-Fa-f]{4})", m.group(1))]
+
+    return size, arr("ui_emoji_bili"), arr("ui_emoji_tile_bg"), arr("ui_emoji_tile_border")
 
 
 def main():
     cjk, ascii_tbl = parse_arrays()
-    groups = parse_ui_layout()
+    groups, defines = parse_ui_layout()
+    emb_sz, emb_bili, emb_tile_bg, emb_tile_border = parse_emoji()
 
     screens = [
+        ("首页", [], "", "", ""),
         ("遥控模式", groups.get("main", []) + groups.get("sub", []),
          "已连接", "点屏幕按钮即可操作", "实体键=空格  轻点=左键"),
         ("鼠标模式", groups.get("mouse", []),
@@ -116,7 +135,7 @@ def main():
          "校准模式", "点住红框松手记录", "3 个点，跟着红框走"),
     ]
 
-    sheet = Image.new("RGB", ((SCR_W + 8) * 2, (SCR_H + 8) * 2), (40, 40, 40))
+    sheet = Image.new("RGB", ((SCR_W + 8) * 2, (SCR_H + 8) * 3), (40, 40, 40))
     missing = []
     overflow = []
 
@@ -188,11 +207,47 @@ def main():
                 text(cx, y + (h - 16) // 2, ch, COL_TEXT)
                 cx += cw
 
-        # 顶栏
+        # 顶栏（与 ui.c draw_header 同步：非首页左上是「< 返回」胶囊）
         fill(0, 0, SCR_W, 26, COL_PANEL)
-        round_rect(8, 8, 10, 10, 3, COL_OK)
-        text(24, 5, mode, COL_TEXT)
-        text(SCR_W - 10 - tw("已连接"), 5, "已连接", COL_OK)
+        conn = "已连接"
+        if mode == "首页":
+            round_rect(8, 8, 10, 10, 3, COL_OK)
+            text(24, 5, mode, COL_TEXT)
+        else:
+            round_rect(2, 2, defines.get("BACK_W", 58), 22, 6, COL_ACCENT)
+            text(8, 5, "<", COL_TEXT)
+            text(20, 5, "返回", COL_TEXT)
+            round_rect(66, 8, 10, 10, 3, COL_OK)
+            text(82, 5, mode, COL_TEXT)
+        text(SCR_W - 8 - tw(conn), 5, conn, COL_OK)
+
+        if mode == "首页":
+            # 磁贴居中 + emoji + 功能名 + 页点 + 两侧箭头（无底栏文字）
+            tsz = defines["HOME_TILE_SZ"]
+            ttx = defines["HOME_TILE_X"]
+            tty = defines["HOME_TILE_Y"]
+            round_rect(ttx, tty, tsz, tsz, 14, emb_tile_bg[0])
+            off = (tsz - emb_sz) // 2
+            for j in range(emb_sz):
+                for i in range(emb_sz):
+                    set_px(ttx + off + i, tty + off + j,
+                           rgb565(emb_bili[j * emb_sz + i]))
+            for t in range(2):
+                fill(ttx, tty + t, tsz, 1, emb_tile_border[0])
+                fill(ttx, tty + tsz - 1 - t, tsz, 1, emb_tile_border[0])
+                fill(ttx + t, tty, 1, tsz, emb_tile_border[0])
+                fill(ttx + tsz - 1 - t, tty, 1, tsz, emb_tile_border[0])
+            nm = "B站视频控制"
+            text((SCR_W - tw(nm)) // 2, defines["HOME_NAME_Y"], nm, COL_TEXT)
+            for i in range(6):
+                dx = (SCR_W - 6 * 14) // 2 + i * 14 + 4
+                round_rect(dx, defines["HOME_DOT_Y"], 6, 6, 3,
+                           COL_ACCENT if i == 0 else COL_SUBTEXT)
+            text(10, tty + tsz // 2 - 8, "<", COL_SUBTEXT)
+            text(SCR_W - 22, tty + tsz // 2 - 8, ">", COL_SUBTEXT)
+            sheet.paste(img, ((idx % 2) * (SCR_W + 8) + 4,
+                              (idx // 2) * (SCR_H + 8) + 4))
+            continue
 
         # 动作卡片
         card_x, card_w = (70, SCR_W - 140) if mode == "鼠标模式" else (6, SCR_W - 12)

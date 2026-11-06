@@ -9,6 +9,7 @@
 #include "cli.h"
 
 #include "esp_console.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "driver/uart_vfs.h"
@@ -20,6 +21,24 @@
 static const char *TAG = "cli";
 
 static esp_console_repl_t *s_repl;
+
+/* mem：看内部 RAM 还剩多少、最大连续块多大。
+   任务堆栈（xTaskCreate）只能从内部 RAM 分配 —— 内部 RAM 一紧张，
+   电台拉列表 / OTA 检查的后台任务就起不来，屏上表现是「点了没反应」。 */
+static int cmd_mem(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    multi_heap_info_t in, ps;
+    heap_caps_get_info(&in, MALLOC_CAP_INTERNAL);
+    heap_caps_get_info(&ps, MALLOC_CAP_SPIRAM);
+    printf("internal: free=%u largest=%u allocated=%u\n",
+           (unsigned)in.total_free_bytes, (unsigned)in.largest_free_block,
+           (unsigned)in.total_allocated_bytes);
+    printf("psram   : free=%u largest=%u\n",
+           (unsigned)ps.total_free_bytes, (unsigned)ps.largest_free_block);
+    return 0;
+}
 
 esp_err_t cli_start(void)
 {
@@ -33,6 +52,13 @@ esp_err_t cli_start(void)
         ESP_LOGW(TAG, "ir_backup register failed: %s", esp_err_to_name(err));
     }
     radio_register_cli();
+
+    esp_console_cmd_t mem_cmd = {
+        .command = "mem",
+        .help = "show internal/psram free heap",
+        .func = cmd_mem,
+    };
+    esp_console_cmd_register(&mem_cmd);
 
     /* ota_update_init 里会注册 wifi/ota 命令（app_main 已调用） */
 

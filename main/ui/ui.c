@@ -134,16 +134,12 @@ static const btn_def_t s_radio_btns[] = {
 
 #define RADIO_BTN_CNT (sizeof(s_radio_btns) / sizeof(s_radio_btns[0]))
 
-/* 台列表：每行 21px，点行选台。行区域是动态命中的（见 ui_hit_test）。 */
+/* 台列表：每行 21px，点行选台。行区域是动态命中的（见 ui_hit_test）。
+   返回统一走左上角「< 返回」，这里不再放「返回电台」按钮 ——
+   一屏出现两个返回入口只会让人猜。 */
 #define RLIST_ROW_Y    32
 #define RLIST_ROW_H    21
-#define RLIST_MAX      8
-
-static const btn_def_t s_rlist_btns[] = {
-    { UI_BTN_RADIO_LIST_BACK, 6, 206, 308, 26, "返回电台", COL_SUBTEXT },
-};
-
-#define RLIST_BTN_CNT (sizeof(s_rlist_btns) / sizeof(s_rlist_btns[0]))
+#define RLIST_MAX      9
 
 /* 升级页：两个按钮并排。「立即升级」只在检查到新版本后绘制/可点，
    严格执行「检测到新版本才能更新」。 */
@@ -383,8 +379,14 @@ static int text_width(const char *str)
 
 /* ==================== 界面元素 ==================== */
 
-/** 顶部状态栏：连接状态点 + 模式文字。
-    非首页模式左侧画「<」，这是全设备唯一的跨页返回入口。 */
+/* 左上角返回键尺寸：整条顶栏高度，宽 58px。
+   之前只画了一个 8 像素宽的 "<" 字符，热区靠「点顶栏任意位置」兜着，
+   但视觉上完全看不出那是按钮 —— 用户就去找右上角、左滑之类的野路子。
+   现在画成实心胶囊 + 「< 返回」文字，一眼可辨、躺着单手也能戳中。 */
+#define BACK_W   58
+
+/** 顶部状态栏：返回键 + 连接状态点 + 模式文字。
+    非首页模式左上角是唯一的「回首页」入口，其余任何位置的返回入口都已移除。 */
 static void draw_header(void)
 {
     fill_rect(0, 0, SCR_W, HEADER_H, COL_PANEL);
@@ -418,17 +420,21 @@ static void draw_header(void)
     default:                   conn_txt = "未连接"; break;
     }
     int conn_tw = text_width(conn_txt);
-    draw_text(SCR_W - 10 - conn_tw, 5, conn_txt, dot_col, 100);
+    draw_text(SCR_W - 8 - conn_tw, 5, conn_txt, dot_col, 100);
 
-    if (s_mode != UI_MODE_HOME) {
-        /* 左上角「<」= 点这里回首页 */
-        draw_text(2, 5, "<", COL_ACCENT, 20);
-        fill_round_rect(22, 8, 10, 10, 3, dot_col);
-        draw_text(38, 5, mode_txt, COL_TEXT, 150);
-    } else {
+    if (s_mode == UI_MODE_HOME) {
         fill_round_rect(8, 8, 10, 10, 3, dot_col);
         draw_text(24, 5, mode_txt, COL_TEXT, 150);
+        return;
     }
+
+    /* 左上角「< 返回」胶囊：点它回首页（命中区见 ui_hit_test） */
+    fill_round_rect(2, 2, BACK_W, HEADER_H - 4, 6, COL_ACCENT);
+    draw_text(8, 5, "<", COL_TEXT, 16);
+    draw_text(20, 5, "返回", COL_TEXT, 36);
+
+    fill_round_rect(66, 8, 10, 10, 3, dot_col);
+    draw_text(82, 5, mode_txt, COL_TEXT, 120);
 }
 
 /** 动作卡片：最近一次动作（可指定横向范围与透明度） */
@@ -511,9 +517,14 @@ static void draw_footer(void)
 
 /* ==================== 首页（emoji 轮播） ==================== */
 
-#define HOME_TILE_X   112
-#define HOME_TILE_Y   34
+/* 磁贴水平居中、垂直方向也居中：屏幕 320x240，96px 磁贴 ->
+   x=112, y=72，磁贴中心正好落在屏幕中心 (160,120)。
+   底下只留功能名与页点，不画底栏 —— 首页是纯图标页。 */
 #define HOME_TILE_SZ  96
+#define HOME_TILE_X   ((SCR_W - HOME_TILE_SZ) / 2)
+#define HOME_TILE_Y   ((SCR_H - HOME_TILE_SZ) / 2)
+#define HOME_NAME_Y   (HOME_TILE_Y + HOME_TILE_SZ + 10)
+#define HOME_DOT_Y    204
 #define HOME_EMOJI_O  ((HOME_TILE_SZ - UI_EMOJI_SZ) / 2)   /* 12 */
 
 static const uint16_t *home_emoji_bitmap(int idx)
@@ -553,21 +564,21 @@ static void draw_home(void)
     blit_emoji(HOME_TILE_X + HOME_EMOJI_O, HOME_TILE_Y + HOME_EMOJI_O, emoji);
     draw_frame(HOME_TILE_X, HOME_TILE_Y, HOME_TILE_SZ, HOME_TILE_SZ, 2, border);
 
-    /* 功能名 */
+    /* 功能名（磁贴正下方） */
     const char *name = s_home_icons[s_home_page].name;
     int nw = text_width(name);
-    draw_text((SCR_W - nw) / 2, HOME_TILE_Y + HOME_TILE_SZ + 12, name,
-              COL_TEXT, 200);
+    draw_text((SCR_W - nw) / 2, HOME_NAME_Y, name, COL_TEXT, 200);
 
     /* 页点 */
     for (int i = 0; i < HOME_ICON_COUNT; i++) {
         int dx = (SCR_W - HOME_ICON_COUNT * 14) / 2 + i * 14 + 4;
-        fill_round_rect(dx, 194, 6, 6, 3, i == s_home_page ? COL_ACCENT : COL_SUBTEXT);
+        fill_round_rect(dx, HOME_DOT_Y, 6, 6, 3,
+                        i == s_home_page ? COL_ACCENT : COL_SUBTEXT);
     }
 
-    /* 左右滑动提示 */
-    draw_text(14, 72, "<", COL_SUBTEXT, 20);
-    draw_text(SCR_W - 30, 72, ">", COL_SUBTEXT, 20);
+    /* 左右滑动提示：贴在磁贴两侧（与磁贴同一水平中线），不在底部堆文字 */
+    draw_text(10, HOME_TILE_Y + HOME_TILE_SZ / 2 - 8, "<", COL_SUBTEXT, 20);
+    draw_text(SCR_W - 22, HOME_TILE_Y + HOME_TILE_SZ / 2 - 8, ">", COL_SUBTEXT, 20);
 }
 
 /* ==================== 电台页（背景图版） ==================== */
@@ -585,7 +596,7 @@ static void draw_radio_list(void)
     /* 列表占满内容区，不画动作卡片（否则和行文字重叠） */
     int cnt = radio_station_count();
     if (cnt <= 0) {
-        draw_text(60, 110, "台列表为空，回到电台页重进", COL_SUBTEXT, 220);
+        draw_text(48, 110, "台列表为空，点左上角返回重进电台", COL_SUBTEXT, 240);
         return;
     }
     if (cnt > RLIST_MAX) {
@@ -764,7 +775,6 @@ static void redraw(void)
         break;
     case UI_MODE_RADIO_LIST:
         draw_radio_list();
-        draw_btn_group(s_rlist_btns, RLIST_BTN_CNT);
         break;
     case UI_MODE_OTA_PAGE:
         draw_ota_page();
@@ -777,7 +787,10 @@ static void redraw(void)
         break;
     }
 
-    if (s_mode != UI_MODE_RADIO && s_mode != UI_MODE_RADIO_LIST) {
+    /* 首页是纯图标页：不画底栏（底部留白，图标才能在屏幕正中）；
+       电台/台列表用全屏背景图，同样不画底栏。 */
+    if (s_mode != UI_MODE_RADIO && s_mode != UI_MODE_RADIO_LIST &&
+        s_mode != UI_MODE_HOME) {
         draw_footer();
     }
 
@@ -850,7 +863,7 @@ ui_button_t ui_hit_test(uint16_t x, uint16_t y)
                 return (ui_button_t)(UI_BTN_RADIO_PICK0 + idx);
             }
         }
-        return hit_group(s_rlist_btns, RLIST_BTN_CNT, x, y);
+        return UI_BTN_NONE;
     }
     if (s_mode == UI_MODE_OTA_PAGE) {
         /* 「立即升级」只在检测到新版本后出现，命中区跟着收放 */

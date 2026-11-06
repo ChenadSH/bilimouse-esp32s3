@@ -50,6 +50,21 @@ static const char *s_radio_list_urls[] = {
 };
 #define RADIO_LIST_URL_CNT  (sizeof(s_radio_list_urls) / sizeof(s_radio_list_urls[0]))
 
+/* 内置默认台（写死在固件里）。
+ *
+ * 为什么必须有：在线列表要「WiFi 连上 + GitHub 可达 + JSON 解析成功」三件事
+ * 全对才有台，任何一环出问题屏幕上就只剩「台列表未就绪」——用户按播放毫无
+ * 反应，看起来就是坏了。内置台让电台永远有东西可播：连不上网时它会明确
+ * 报「WiFi 没连上」，而不是装作在拉列表。
+ *
+ * 三个都是 CNR 官方 HLS 源，HTTP 明文（不依赖证书 / 系统时间）。 */
+static const radio_station_t s_default_stations[] = {
+    { "中国之声", "http://satellitepull.cnr.cn/live/wxzgzs/playlist.m3u8" },
+    { "经济之声", "http://satellitepull.cnr.cn/live/wxjjzs/playlist.m3u8" },
+    { "音乐之声", "http://satellitepull.cnr.cn/live/wxyyzs/playlist.m3u8" },
+};
+#define DEFAULT_ST_CNT  (sizeof(s_default_stations) / sizeof(s_default_stations[0]))
+
 #define BUF_CAP      (32 * 1024)
 #define HIGH_WATER   (BUF_CAP - 8 * 1024)   /* 高于此值暂停网络读 */
 #define DECODE_MIN   2048                    /* 至少攒这么多再解码 */
@@ -63,12 +78,18 @@ static const char *s_radio_list_urls[] = {
 /* 台结构与拉列表的文本缓冲都放 PSRAM：内部 RAM 要留给 WiFi/BLE/LCD DMA，
    v2.4 里这三个静态数组合计近 20KB，曾直接把 esp_wifi_init 挤到 NO_MEM */
 static radio_station_t s_st[RADIO_MAX_STATIONS] EXT_RAM_BSS_ATTR;
+/* 解析暂存区：在线列表先解析到这里，整体成功才拷进 s_st。
+   直接往 s_st 里解析会在中途把 s_cnt 清 0，此时若正在播放，
+   换台算 s_cur % s_cnt 就是除零 —— 直接 panic。 */
+static radio_station_t s_stage[RADIO_MAX_STATIONS] EXT_RAM_BSS_ATTR;
 static int s_cnt;
 static int s_cur;
 static char s_status[48];
 
 /* 拉取 HTTP 文本的复用缓冲（台列表 ~2KB、playlist ~4KB） */
 static char s_http_body[8192] EXT_RAM_BSS_ATTR;
+/* playlist 单独一份：台列表刷新和播放可能并发，共用一块缓冲会互相踩 */
+static char s_pl_body[4096] EXT_RAM_BSS_ATTR;
 
 /* 请求字：UI/串口写，radio 任务消费 */
 typedef enum {
@@ -100,6 +121,22 @@ static void set_status(const char *txt)
 {
     strlcpy(s_status, txt, sizeof(s_status));
     ui_mark_dirty();
+}
+
+/** 写入内置默认台。只在台列表为空时生效 —— 绝不覆盖已拉到的在线列表。 */
+static void seed_defaults(void)
+{
+    if (s_cnt > 0) {
+        return;
+    }
+    int n = (int)DEFAULT_ST_CNT;
+    if (n > RADIO_MAX_STATIONS) {
+        n = RADIO_MAX_STATIONS;
+    }
+    memcpy(s_st, s_default_stations, (size_t)n * sizeof(s_st[0]));
+    s_cnt = n;
+    s_cur = 0;
+    ESP_LOGI(TAG, "seeded %d built-in station(s)", n);
 }
 
 void radio_status_text(char *buf, int len)
@@ -165,12 +202,13 @@ static void json_unescape(char *s)
     *w = '\0';
 }
 
-/** 提取 "name"（不会误匹配 "name_en"）与 "stream_url" 字段对 */
-static esp_err_t parse_stations(char *body)
+/** 提取 "name"（不会误匹配 "name_en"）与 "stream_url" 字段对。
+ *  解析到 dst 暂存区，*out_cnt 返回条数；调用方确认成功后再整体替换。 */
+static esp_err_t parse_stations(char *body, radio_station_t *dst, int *out_cnt)
 {
-    s_cnt = 0;
+    int cnt = 0;
     const char *p = body;
-    while (s_cnt < RADIO_MAX_STATIONS && (p = strstr(p, "\"name\""))) {
+    while (cnt < RADIO_MAX_STATIONS && (p = strstr(p, "\"name\""))) {
         const char *n = strchr(p + 6, '"');
         if (!n) break;
         n++;
@@ -185,19 +223,20 @@ static esp_err_t parse_stations(char *body)
         if (!ue) break;
 
         int nl = ne - n, ul = ue - u;
-        if (nl > 0 && ul > 0 && nl < (int)sizeof(s_st[s_cnt].name) &&
-            ul < (int)sizeof(s_st[s_cnt].url)) {
-            memcpy(s_st[s_cnt].name, n, nl);
-            s_st[s_cnt].name[nl] = '\0';
-            memcpy(s_st[s_cnt].url, u, ul);
-            s_st[s_cnt].url[ul] = '\0';
-            json_unescape(s_st[s_cnt].url);
-            ESP_LOGI(TAG, "station[%d] %s | %s", s_cnt, s_st[s_cnt].name, s_st[s_cnt].url);
-            s_cnt++;
+        if (nl > 0 && ul > 0 && nl < (int)sizeof(dst[cnt].name) &&
+            ul < (int)sizeof(dst[cnt].url)) {
+            memcpy(dst[cnt].name, n, nl);
+            dst[cnt].name[nl] = '\0';
+            memcpy(dst[cnt].url, u, ul);
+            dst[cnt].url[ul] = '\0';
+            json_unescape(dst[cnt].url);
+            ESP_LOGI(TAG, "station[%d] %s | %s", cnt, dst[cnt].name, dst[cnt].url);
+            cnt++;
         }
         p = ue;
     }
-    return s_cnt ? ESP_OK : ESP_ERR_NOT_FOUND;
+    *out_cnt = cnt;
+    return cnt ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
 static esp_err_t radio_fetch_list_one(const char *url)
@@ -241,7 +280,19 @@ static esp_err_t radio_fetch_list_one(const char *url)
         return ESP_ERR_NOT_FOUND;
     }
     ESP_LOGI(TAG, "station list: %d bytes, http %d (%s)", n, code, url);
-    return parse_stations(body);
+
+    int cnt = 0;
+    esp_err_t e = parse_stations(body, s_stage, &cnt);
+    if (e != ESP_OK || cnt <= 0) {
+        return e;
+    }
+    /* 解析成功才替换：s_cnt 全程不会出现中间态 0 */
+    memcpy(s_st, s_stage, (size_t)cnt * sizeof(s_st[0]));
+    s_cnt = cnt;
+    if (s_cur >= s_cnt) {
+        s_cur = 0;
+    }
+    return ESP_OK;
 }
 
 /** 依次尝试所有镜像源，任一成功即可 */
@@ -313,9 +364,9 @@ static int fetch_playlist(const char *url, char *segs, int max_segs, int *seg_cn
     }
     esp_http_client_fetch_headers(cli);
 
-    /* 同上：指针的 sizeof 是 4，必须用 s_http_body 的真实大小 */
-    char *text = s_http_body;
-    const size_t cap = sizeof(s_http_body);
+    /* 用独立缓冲：电台列表刷新任务可能同时在写 s_http_body */
+    char *text = s_pl_body;
+    const size_t cap = sizeof(s_pl_body);
     int n = 0, r;
     while (n < (int)cap - 1 &&
            (r = esp_http_client_read(cli, text + n, cap - 1 - n)) > 0) {
@@ -514,6 +565,10 @@ static play_result_t play_station(int idx)
             break;
         }
         if (s_req == REQ_NEXT || s_req == REQ_PREV) {
+            if (s_cnt <= 0) {        /* 列表被换空了也不可能除零 */
+                s_req = REQ_NONE;
+                continue;
+            }
             s_cur = (s_cur + (s_req == REQ_NEXT ? 1 : s_cnt - 1)) % s_cnt;
             s_req = REQ_NONE;
             show_station("切换中…");
@@ -630,16 +685,18 @@ static void radio_task(void *arg)
         }
 
         /* REQ_TOGGLE */
-        if (!s_list_loading && s_cnt == 0) {
-            /* 列表没拿到（首次拉取失败也走到这）：自动重拉一次，
-               不让用户被迫「重进电台页」。 */
-            show_station("列表未就绪，自动重拉…");
-            xTaskCreate(fetch_list_task, "radio_list", RADIO_LIST_STACK, NULL, 3, NULL);
-            continue;
-        }
-        if (s_cnt == 0) {
-            show_station("还在拉取台列表…");
-            continue;
+        if (s_cnt <= 0) {
+            /* 台列表还没拿到（首次拉取失败 / WiFi 刚起来）：
+               立刻用内置台兜底，让「按下就有声」，同时后台继续拉在线列表，
+               拉到了再无缝替换。用户不再需要「重进电台页」。 */
+            seed_defaults();
+            if (!s_list_loading) {
+                xTaskCreate(fetch_list_task, "radio_list", RADIO_LIST_STACK, NULL, 3, NULL);
+            }
+            if (s_cnt <= 0) {
+                show_station("没有可用的台");
+                continue;
+            }
         }
 
         /* 播放循环：换台自动接续，直到用户停止或出错 */
@@ -695,8 +752,10 @@ static void fetch_list_task(void *arg)
         set_status(sub);
         show_station(sub);
     } else {
-        set_status("台列表获取失败");
-        ui_show_action("电台", "列表获取失败，重进电台重试");
+        /* 在线列表失败也不让电台变砖：内置台继续可用 */
+        seed_defaults();
+        set_status("在线列表失败，用内置台");
+        show_station("在线列表获取失败，内置台可直接播");
     }
     vTaskDelete(NULL);
 }
@@ -719,10 +778,16 @@ void radio_enter(void)
             set_status("音频硬件不可用");
         }
     }
-    if (!s_list_loading && s_cnt == 0) {
+    /* 内置台先兜底：一进电台页就有台可播，不用等网络往返 */
+    if (s_cnt == 0) {
+        seed_defaults();
+        set_status("内置台，正在拉在线列表…");
+    }
+    /* 每次都刷新一次在线列表（拿到就替换内置台，拿不到保留内置台） */
+    if (!s_list_loading) {
         xTaskCreate(fetch_list_task, "radio_list", RADIO_LIST_STACK, NULL, 3, NULL);
     }
-    show_station(s_cnt ? s_status : "拉取台列表中…");
+    show_station(s_status[0] ? s_status : "待播放");
 }
 
 void radio_next(void)
@@ -813,9 +878,11 @@ static int cmd_radio(int argc, char **argv)
         return 0;
     }
     if (argc == 2 && strcmp(argv[1], "update") == 0) {
-        s_cnt = 0;
-        s_cur = 0;
-        xTaskCreate(fetch_list_task, "radio_list", RADIO_LIST_STACK, NULL, 3, NULL);
+        /* 不要把 s_cnt 清零：清 0 期间正在播放的任务会算 s_cur % 0。
+           新列表解析成功后整体替换，失败则保留现有（内置）台。 */
+        if (!s_list_loading) {
+            xTaskCreate(fetch_list_task, "radio_list", RADIO_LIST_STACK, NULL, 3, NULL);
+        }
         printf("refreshing station list...\n");
         return 0;
     }

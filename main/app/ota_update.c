@@ -43,6 +43,8 @@ static const char *TAG = "ota";
 /* ==================== WiFi ==================== */
 
 static bool s_wifi_inited;
+static bool s_netif_created;   /* 默认 STA netif 是否已创建（只能创建一次，
+                                  重复创建会触发 esp_netif 断言 -> 重启） */
 static volatile bool s_wifi_got_ip;
 static esp_event_handler_instance_t s_ev_any;
 static esp_event_handler_instance_t s_ev_ip;
@@ -64,23 +66,28 @@ static void wifi_event_cb(void *arg, esp_event_base_t base,
     }
 }
 
+/** 分步幂等的 WiFi 初始化：任何一步失败都可以安全重试。
+ *  netif 只能创建一次（重复创建 -> esp_netif 断言 -> 重启），
+ *  esp_wifi_init 失败后下一次调用会重试（内存可能已被别的任务释放）。 */
 static esp_err_t wifi_init_once(void)
 {
     if (s_wifi_inited) {
         return ESP_OK;
     }
-    esp_err_t err = esp_netif_init();
-    if (err != ESP_OK) {
-        return err;
+    if (!s_netif_created) {
+        esp_err_t err = esp_netif_init();
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            return err;
+        }
+        err = esp_event_loop_create_default();
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            return err;
+        }
+        esp_netif_create_default_wifi_sta();
+        s_netif_created = true;
     }
-    err = esp_event_loop_create_default();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
-    }
-    esp_netif_create_default_wifi_sta();
-
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    err = esp_wifi_init(&cfg);
+    esp_err_t err = esp_wifi_init(&cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_init: %s", esp_err_to_name(err));
         return err;
@@ -211,10 +218,57 @@ static esp_err_t wifi_ensure_connected(void)
 
 typedef struct {
     char version[24];
-    char url[192];
+    char url[384];   /* GitHub 资产的最终地址带签名参数，可能 300+ 字节 */
     char notes[96];
     int  size;       /* 升级包字节数（可选字段，旧 manifest 没有 = 0） */
 } ota_manifest_t;
+
+/** 跟随 30x 重定向解析出最终 URL。
+ *  esp_http_client 的 open/read 低层 API 不自动跟随重定向，而
+ *  releases/latest/download/xxx 固定链接必然 302（先跳版本化地址，
+ *  再跳 objects.githubusercontent.com 签名地址），必须手动跟。 */
+static esp_err_t http_resolve_url(const char *url_in, char *out, size_t outlen)
+{
+    char url[512];
+    strlcpy(url, url_in, sizeof(url));
+    for (int hop = 0; hop < 5; hop++) {
+        esp_http_client_config_t cfg = {
+            .url = url,
+            .timeout_ms = 8000,
+            .buffer_size = 1024,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+        };
+        esp_http_client_handle_t c = esp_http_client_init(&cfg);
+        if (!c) {
+            return ESP_FAIL;
+        }
+        esp_err_t err = esp_http_client_open(c, 0);
+        if (err != ESP_OK) {
+            esp_http_client_cleanup(c);
+            return err;
+        }
+        esp_http_client_fetch_headers(c);
+        int code = esp_http_client_get_status_code(c);
+        char loc[512] = {0};
+        char *p = NULL;
+        if (esp_http_client_get_header(c, "Location", &p) == ESP_OK && p) {
+            strlcpy(loc, p, sizeof(loc));
+        }
+        esp_http_client_close(c);
+        esp_http_client_cleanup(c);
+
+        bool redirect = (code == 301 || code == 302 || code == 303 ||
+                         code == 307 || code == 308) && loc[0];
+        if (!redirect) {
+            break;
+        }
+        ESP_LOGI(TAG, "follow redirect %d -> %.60s%s", code, loc,
+                 strlen(loc) > 60 ? "…" : "");
+        strlcpy(url, loc, sizeof(url));
+    }
+    strlcpy(out, url, outlen);
+    return ESP_OK;
+}
 
 /** manifest URL：NVS 覆盖 Kconfig */
 static bool manifest_url_get(char *buf, size_t len)
@@ -263,10 +317,16 @@ static int semver_cmp(const char *a, const char *b)
 /** HTTP GET manifest 并解析 JSON。失败返回错误码。 */
 static esp_err_t manifest_fetch(ota_manifest_t *m)
 {
-    char url[256];
+    char url[512];
     if (!manifest_url_get(url, sizeof(url))) {
         ESP_LOGW(TAG, "manifest url empty (serial: 'ota url <http://...>')");
         return ESP_ERR_INVALID_STATE;
+    }
+    /* latest 固定链接是 302 链，先解析出真实的资产地址 */
+    esp_err_t e = http_resolve_url(url, url, sizeof(url));
+    if (e != ESP_OK) {
+        ESP_LOGW(TAG, "resolve manifest url failed: %s", esp_err_to_name(e));
+        return e;
     }
 
     esp_http_client_config_t cfg = {
@@ -363,8 +423,17 @@ static void state_wifi(const char *txt)
 /** 下载 + 写 flash + 切启动分区。成功不返回（重启）。 */
 static esp_err_t ota_perform(void)
 {
+    /* bin 地址同样可能是个 302 链（latest/download 固定链接），
+       先解析到真实的对象存储地址再交给 esp_https_ota */
+    char bin_url[512];
+    esp_err_t e = http_resolve_url(s_manifest.url, bin_url, sizeof(bin_url));
+    if (e != ESP_OK) {
+        ESP_LOGE(TAG, "resolve bin url failed: %s", esp_err_to_name(e));
+        return e;
+    }
+
     esp_http_client_config_t http_cfg = {
-        .url = s_manifest.url,
+        .url = bin_url,
         .timeout_ms = 20000,
         .buffer_size = 4096,
         .keep_alive_enable = false,
@@ -559,10 +628,33 @@ void ota_update_check(void)
         ui_show_hint("更新任务进行中");
         return;
     }
+
+    /* 先把状态切到「连接 WiFi」再起任务。
+       以前只有后台任务起来后才刷新屏幕，而任务一旦创建失败
+       （内部 RAM 不够时 xTaskCreate 会直接返回失败）屏幕上**一点反应都没有**，
+       用户看到的就是「点了开始检查更新没反应」。现在按钮一点，屏幕立刻变。 */
+    memset(&s_state, 0, sizeof(s_state));
+    s_state.phase = OTA_PHASE_WIFI;
+    s_state.percent = -1;
+    strlcpy(s_state.cur_version, esp_app_get_description()->version,
+            sizeof(s_state.cur_version));
+    strlcpy(s_state.wifi_info, "准备中…", sizeof(s_state.wifi_info));
+    strlcpy(s_state.list_info, "未检查", sizeof(s_state.list_info));
+    strlcpy(s_state.cmp_info, "未检查", sizeof(s_state.cmp_info));
+    ui_mark_dirty();
+    power_mgr_notify_activity();
+
     s_task_busy = true;
     if (xTaskCreate(check_task, "ota_chk", OTA_TASK_STACK, NULL, 3, NULL) != pdPASS) {
         s_task_busy = false;
+        s_state.phase = OTA_PHASE_FAIL;
+        strlcpy(s_state.wifi_info, "内存不足，任务起不来", sizeof(s_state.wifi_info));
+        ESP_LOGE(TAG, "check task create failed, free heap=%u",
+                 (unsigned)esp_get_free_heap_size());
+        ui_mark_dirty();
+        return;
     }
+    ESP_LOGI(TAG, "check started");
 }
 
 void ota_update_download(void)
@@ -577,8 +669,17 @@ void ota_update_download(void)
         return;
     }
     s_task_busy = true;
+    /* 同样先给屏幕一个即时反馈（进度条 0%），再起后台任务 */
+    s_state.percent = 0;
+    s_state.done_kb = 0;
+    s_state.phase = OTA_PHASE_DOWNLOAD;
+    ui_mark_dirty();
     if (xTaskCreate(download_task, "ota_dl", OTA_TASK_STACK, NULL, 3, NULL) != pdPASS) {
         s_task_busy = false;
+        s_state.phase = OTA_PHASE_FAIL;
+        ESP_LOGE(TAG, "download task create failed, free heap=%u",
+                 (unsigned)esp_get_free_heap_size());
+        ui_mark_dirty();
     }
 }
 
@@ -670,7 +771,8 @@ esp_err_t ota_update_init(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "wifi init failed: %s (OTA 不可用，其余功能不受影响)",
                  esp_err_to_name(err));
-        return err;
+        /* 不 return：wifi/ota 命令必须注册，否则串口连 ota check 都没有，
+           而且之后 wifi_ensure_connected 里还会重试 wifi_init_once */
     }
 
     esp_console_cmd_t wifi_cmd = {
