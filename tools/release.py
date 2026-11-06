@@ -88,6 +88,7 @@ def main():
     #    不经过 cmd 一行链（%IDF_PATH% 会在 env.bat 生效前被展开），
     #    也不用 build.bat（部分终端下成功也返回 1）。
     env = os.environ.copy()
+    env.pop("MSYSTEM", None)   # 关键：Git Bash 下 MSYSTEM 会让 idf.py 打印警告后直接退出(rc=0)，根本不编译
     for m in re.finditer(r'^set\s+"?(\w+)=(.*?)"?\s*$',
                          (ROOT / "tools" / "env.bat").read_text(encoding="utf-8"),
                          re.M):
@@ -99,7 +100,13 @@ def main():
         sys.exit(f"error: idf.py build failed ({r.returncode})")
     if not BIN.exists():
         sys.exit("error: build/bilimouse.bin 不存在")
-    print(f"bin ok: {BIN.stat().st_size} bytes")
+    # 防呆：确认 bin 里真的是本次版本号（曾因 idf.py 静默不编译，
+    # 连续两个 release 传的都是旧版本固件，设备 OTA 后版本不变无限循环）
+    blob = BIN.read_bytes()
+    if ver.encode() not in blob:
+        sys.exit(f"error: build/bilimouse.bin 里找不到版本号 {ver}，"
+                 f"说明这次没有真正重新编译（检查 MSYSTEM / idf.py 输出）")
+    print(f"bin ok: {BIN.stat().st_size} bytes, version {ver} verified")
 
     # 3.5 资产双通道：
     #   GitHub Releases 的 CDN（Azure Front Door）对 ESP-IDF 的 TLS 指纹有
