@@ -649,8 +649,12 @@ static void ota_check_run(bool auto_mode)
 
 static void ota_download_run(void)
 {
-    if (!s_manifest_valid || s_state.phase != OTA_PHASE_READY) {
-        ESP_LOGW(TAG, "download without a READY check");
+    /* 注意：不能校验 phase == READY —— ota_update_download() 起任务前
+       已经把 phase 置成 OTA_PHASE_DOWNLOAD（为了让屏幕立刻显示进度条），
+       这里再要求 READY 会永远不成立（表现为「download without a READY
+       check」，升级按钮点了没反应）。真正的前提只有「manifest 有效」。 */
+    if (!s_manifest_valid) {
+        ESP_LOGW(TAG, "download without a valid manifest");
         s_state.phase = OTA_PHASE_FAIL;
         return;
     }
