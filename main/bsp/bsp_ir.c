@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 
 static const char *TAG = "bsp_ir";
 
@@ -55,6 +56,12 @@ static inline void sym_set(rmt_symbol_word_t *s, uint16_t d0, bool l0, uint16_t 
     s->level1    = l1;
 }
 
+/* RMT TX 非 DMA 模式下，copy 编码器在发送中断里直接读用户缓冲，
+   缓冲区必须在内部 RAM。调用方的码库存在 PSRAM（ir_remote.c 的
+   s_bank 是 EXT_RAM_BSS），flash 操作（NVS 写入）期间 cache 关闭，
+   此时 ISR 读 PSRAM 会直接崩溃。先搬到内部 RAM 再发。 */
+static rmt_symbol_word_t s_tx_stage[IR_MEM_SYMBOLS] __attribute__((aligned(4)));
+
 esp_err_t bsp_ir_send_raw(const rmt_symbol_word_t *syms, size_t count)
 {
     if (!s_ready || !s_tx_chan) {
@@ -64,11 +71,13 @@ esp_err_t bsp_ir_send_raw(const rmt_symbol_word_t *syms, size_t count)
         return ESP_ERR_INVALID_ARG;
     }
 
+    memcpy(s_tx_stage, syms, count * sizeof(rmt_symbol_word_t));
+
     rmt_transmit_config_t tx_cfg = {
         .loop_count = 0,          /* 不发重复码 */
         .flags.eot_level = 0,     /* 发完把线拉低，避免 LED 常亮 */
     };
-    ESP_RETURN_ON_ERROR(rmt_transmit(s_tx_chan, s_copy_enc, syms,
+    ESP_RETURN_ON_ERROR(rmt_transmit(s_tx_chan, s_copy_enc, s_tx_stage,
                                      count * sizeof(rmt_symbol_word_t), &tx_cfg),
                         TAG, "transmit failed");
     return rmt_tx_wait_all_done(s_tx_chan, 1000);
@@ -110,9 +119,6 @@ size_t bsp_ir_capture(rmt_symbol_word_t *out, size_t max_symbols, uint32_t timeo
         max_symbols = IR_MEM_SYMBOLS;
     }
 
-    xEventGroupClearBits(s_rx_evt, BIT_RX_DONE);
-    s_rx_count = 0;
-
     /* signal_range_max_ns = 25ms：接收头在最后一个跳变后静默 25ms
        就自动判定一帧结束，不需要额外的超时逻辑。
        ⚠️ 不能设 40ms：ESP32-S3 RMT 的 idle 计数器是 15 位（上限 32767
@@ -124,32 +130,55 @@ size_t bsp_ir_capture(rmt_symbol_word_t *out, size_t max_symbols, uint32_t timeo
         .signal_range_max_ns = 25 * 1000 * 1000,
     };
 
-    esp_err_t err = rmt_receive(s_rx_chan, out, max_symbols * sizeof(rmt_symbol_word_t), &rx_cfg);
-    if (err != ESP_OK) {
-        /* 上一次接收还没收尾时会返回 INVALID_STATE，复位通道再试一次 */
-        ESP_LOGW(TAG, "rx start failed (%s), resetting channel", esp_err_to_name(err));
-        rmt_disable(s_rx_chan);
-        rmt_enable(s_rx_chan);
-        err = rmt_receive(s_rx_chan, out, max_symbols * sizeof(rmt_symbol_word_t), &rx_cfg);
+    /* ⚠️ RMT 的 idle 判定从「启动接收」那一刻就开始计时：
+       线路持续静默 25ms 就会触发一次 rx_done（num_symbols=0）。
+       用户从点「学习」到按下遥控器远超 25ms，老代码第一次空完成就
+       返回 0 —— 永远录不到信号。必须吞掉 0 符号的空完成、循环重启
+       接收，直到拿到真实信号或总超时耗尽。 */
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    for (;;) {
+        xEventGroupClearBits(s_rx_evt, BIT_RX_DONE);
+        s_rx_count = 0;
+
+        esp_err_t err = rmt_receive(s_rx_chan, out, max_symbols * sizeof(rmt_symbol_word_t), &rx_cfg);
         if (err != ESP_OK) {
+            /* 上一次接收还没收尾时会返回 INVALID_STATE，复位通道再试一次 */
+            ESP_LOGW(TAG, "rx start failed (%s), resetting channel", esp_err_to_name(err));
+            rmt_disable(s_rx_chan);
+            rmt_enable(s_rx_chan);
+            err = rmt_receive(s_rx_chan, out, max_symbols * sizeof(rmt_symbol_word_t), &rx_cfg);
+            if (err != ESP_OK) {
+                return 0;
+            }
+        }
+
+        TickType_t now = xTaskGetTickCount();
+        if ((int32_t)(deadline - now) <= 0) {
+            rmt_disable(s_rx_chan);
+            rmt_enable(s_rx_chan);
             return 0;
         }
-    }
 
-    EventBits_t bits = xEventGroupWaitBits(s_rx_evt, BIT_RX_DONE, pdTRUE, pdFALSE,
-                                           pdMS_TO_TICKS(timeout_ms));
-    if (!(bits & BIT_RX_DONE)) {
-        /* 超时：把通道复位，免得下次调用永远 INVALID_STATE */
-        rmt_disable(s_rx_chan);
-        rmt_enable(s_rx_chan);
-        return 0;
-    }
+        EventBits_t bits = xEventGroupWaitBits(s_rx_evt, BIT_RX_DONE, pdTRUE, pdFALSE,
+                                               deadline - now);
+        if (!(bits & BIT_RX_DONE)) {
+            /* 超时：把通道复位，免得下次调用永远 INVALID_STATE */
+            rmt_disable(s_rx_chan);
+            rmt_enable(s_rx_chan);
+            return 0;
+        }
 
-    size_t cnt = s_rx_count;
-    if (cnt > max_symbols) {
-        cnt = max_symbols;
+        if (s_rx_count == 0) {
+            /* 静默触发的空完成：重启接收，继续等真实信号 */
+            continue;
+        }
+
+        size_t cnt = s_rx_count;
+        if (cnt > max_symbols) {
+            cnt = max_symbols;
+        }
+        return cnt;
     }
-    return cnt;
 }
 
 /* ==================== 初始化 ==================== */

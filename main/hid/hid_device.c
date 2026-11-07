@@ -7,10 +7,12 @@
  */
 #include "hid_device.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "esp_bt.h"
+#include "esp_console.h"
 #include "esp_bt_defs.h"
 #include "esp_bt_device.h"
 #include "esp_bt_main.h"
@@ -52,11 +54,14 @@ static uint8_t  s_key_mod = 0;            /* 当前按住的键盘修饰键（Ct
 
 static esp_bd_addr_t s_peer_bda;          /* 当前/最近连接的对方地址 */
 static uint32_t s_connect_ms = 0;         /* 连接建立时刻，用于配对超时 */
+static uint8_t  s_enc_retries = 0;        /* 已重发的加密请求次数 */
+static uint32_t s_enc_last_ms = 0;        /* 上一次发加密请求的时刻 */
 static bool     s_adv_active = false;     /* 广播是否真的在跑（GAP 事件确认） */
 static uint32_t s_adv_last_try_ms = 0;
 static bool     s_pair_failed = false;    /* 最近一次配对失败（供 UI 提示） */
 static uint8_t  s_auth_fail = 0;          /* 连续配对失败次数 */
 static bool     s_ble_down = false;       /* BLE 协议栈已被挂起（OTA 期间） */
+static bool     s_peer_bonded = false;    /* 当前对端在本机绑定列表里（连接时判定） */
 
 /* ================= 广播数据 ================= */
 /*
@@ -197,8 +202,32 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
         s_report_enabled = false;
         s_adv_active = false;
         s_connect_ms = now_ms();
+        s_enc_retries = 0;
+        s_enc_last_ms = 0;
         s_pair_failed = false;
         s_state = HID_STATE_CONNECTING;
+
+        /* 对端是否已绑定，决定后面「静默重加密」的判定路径
+           （见 hid_device_service 里的说明）。 */
+        s_peer_bonded = false;
+        {
+            int bond_num = esp_ble_get_bond_device_num();
+            if (bond_num > 0) {
+                esp_ble_bond_dev_t *lst = malloc((size_t)bond_num * sizeof(*lst));
+                if (lst) {
+                    int n = bond_num;
+                    if (esp_ble_get_bond_device_list(&n, lst) == ESP_OK) {
+                        for (int i = 0; i < n; i++) {
+                            if (memcmp(lst[i].bd_addr, s_peer_bda, sizeof(esp_bd_addr_t)) == 0) {
+                                s_peer_bonded = true;
+                                break;
+                            }
+                        }
+                    }
+                    free(lst);
+                }
+            }
+        }
 
         /* 连接参数更新请求放到配对完成后再发（见 AUTH_CMPL）。
            刚连上就发，主机正忙着服务发现，多数会直接忽略。 */
@@ -469,6 +498,51 @@ void hid_device_clear_bonds(void)
     free(list);
 }
 
+/* ================= 串口诊断 =================
+ * 「电脑上显示已连接，屏幕上显示未连接/配对中，鼠标不能用」——
+ * 出现这类问题时让用户敲 `ble`，把输出贴回来即可定位卡在哪一环。 */
+static int cmd_ble(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    static const char *const state_names[] = {
+        "IDLE(未连接)", "ADVERTISING(广播中)", "CONNECTING(配对中)", "READY(已就绪)",
+    };
+    int st = (int)s_state;
+    printf("ble_down=%d connected=%d secure=%d report_enabled=%d\n",
+           s_ble_down, s_connected, s_secure, s_report_enabled);
+    printf("state=%s adv_active=%d pair_failed=%d auth_fail=%d\n",
+           (st >= 0 && st <= 3) ? state_names[st] : "?",
+           s_adv_active, s_pair_failed, s_auth_fail);
+    printf("peer=%02x:%02x:%02x:%02x:%02x:%02x bonds=%d\n",
+           s_peer_bda[0], s_peer_bda[1], s_peer_bda[2],
+           s_peer_bda[3], s_peer_bda[4], s_peer_bda[5],
+           esp_ble_get_bond_device_num());
+    if (s_connected) {
+        esp_ble_conn_update_params_t dummy; (void)dummy;
+        esp_gap_conn_params_t cp;
+        if (esp_ble_get_current_conn_params(s_peer_bda, &cp) == ESP_OK) {
+            printf("conn interval=%.2fms latency=%d timeout=%dms\n",
+                   cp.interval * 1.25, cp.latency, cp.timeout * 10);
+        }
+    }
+    if (argc == 2 && strcmp(argv[1], "unbond") == 0) {
+        hid_device_clear_bonds();
+        printf("bonds cleared; remove 'BiliMouse' on the computer too, then re-pair\n");
+    }
+    return 0;
+}
+
+void hid_device_register_cli(void)
+{
+    esp_console_cmd_t ble_cmd = {
+        .command = "ble",
+        .help = "show BLE link state; 'ble unbond' clears saved keys",
+        .func = cmd_ble,
+    };
+    esp_console_cmd_register(&ble_cmd);
+}
+
 /* ================= OTA 期间的蓝牙挂起/恢复 =================
  * 内部 RAM 极度紧张：BLE（控制器 + Bluedroid 主机）常驻约 60~80KB，
  * 而 OTA 检查/下载需要 9KB 任务栈 + TLS 缓冲 + LWIP 收发缓冲，
@@ -558,10 +632,46 @@ void hid_device_service(void)
         start_advertising();
     }
 
-    if (s_connected && !s_secure && (now - s_connect_ms) > 8000) {
+    /* 加密请求重试：profile 层在 GATTS_CONNECT_EVT 里发的第一次
+       esp_ble_set_encryption() 有概率因为时序（连接参数更新/服务发现
+       同时进行）被协议栈丢掉，返回错误也没人重试 —— 于是链路永远停在
+       「已连接但未加密」，8 秒后被下面的看门狗断开，屏幕在
+       「配对中/未连接」之间反复跳，鼠标一直不能用。
+       1.5s 没等到加密完成就主动重发，最多 3 次；还不行才断开让主机重连。 */
+    if (s_connected && !s_secure && s_enc_retries < 3 &&
+        (now - s_connect_ms) > 1500 &&
+        (s_enc_last_ms == 0 || (now - s_enc_last_ms) > 1500)) {
+        s_enc_retries++;
+        s_enc_last_ms = now;
+        ESP_LOGW(TAG, "no encryption yet, re-requesting (%d/3)", s_enc_retries);
+        esp_ble_set_encryption(s_peer_bda, ESP_BLE_SEC_ENCRYPT_NO_MITM);
+    }
+
+    /* ⚠️ 已绑定主机重连的「静默加密」路径（曾经「蓝牙显示已连接、屏幕显示
+       未连接、鼠标不能用」的根因）：
+       BLE 链路加密只能由主方发起。Windows/macOS 重连已绑定设备时，会在
+       连接建立后立刻用保存的 LTK 直接加密 —— 整个过程不经过本机 SMP，
+       ESP_GAP_BLE_AUTH_CMPL_EVT 不会触发（IDF 里 esp_ble_set_encryption
+       完成回调 btc_set_encryption_callback 是空函数，重加密没有任何事件）。
+       于是 s_secure 永远为假，8 秒看门狗把连接踢掉，主机自动重连，
+       屏幕在「配对中/未连接」之间反复跳，鼠标一直不能用。
+       判定：对端在绑定列表里 + 连接稳定保持 2s 以上 —— 密钥真对不上时
+       主机会在几百毫秒内主动断链，撑不到 2s。 */
+    if (s_connected && !s_secure && s_peer_bonded &&
+        (now - s_connect_ms) > 2000) {
+        ESP_LOGI(TAG, "bonded peer silently re-encrypted (no AUTH_CMPL), marking secure");
+        s_secure = true;
+        s_report_enabled = true;
+        s_state = HID_STATE_READY;
+        request_fast_conn_params();
+    }
+
+    /* 只对「未绑定」对端做 8 秒配对超时：已绑定的走上面的静默加密判定 */
+    if (s_connected && !s_secure && !s_peer_bonded && (now - s_connect_ms) > 8000) {
         ESP_LOGW(TAG, "no encryption within 8s, disconnecting so host can retry");
         esp_ble_gap_disconnect(s_peer_bda);
         s_connect_ms = now;
+        s_enc_retries = 0;
     }
 }
 

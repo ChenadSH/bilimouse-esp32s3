@@ -267,7 +267,16 @@ esp_err_t bsp_audio_start(uint32_t sample_rate)
 
     i2s_std_clk_config_t clk = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
     clk.mclk_multiple = I2S_MCLK_MULTIPLE_256;
-    ESP_RETURN_ON_ERROR(i2s_channel_disable(s_tx), TAG, "dis");
+
+    /* ⚠️ 通道刚创建（或上次 stop 已 disable）时处于未使能状态，
+       i2s_channel_disable 会返回 ESP_ERR_INVALID_STATE —— 这不是错误。
+       老代码用 ESP_RETURN_ON_ERROR 直接返回：enable/开功放永远执行不到，
+       bsp_audio_write 随后恒 INVALID_STATE —— 电台「显示播放中但全程无声」。 */
+    esp_err_t err = i2s_channel_disable(s_tx);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "i2s disable failed: %s", esp_err_to_name(err));
+        return err;
+    }
     ESP_RETURN_ON_ERROR(i2s_channel_reconfig_std_clock(s_tx, &clk), TAG, "clk");
     ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx), TAG, "en");
 

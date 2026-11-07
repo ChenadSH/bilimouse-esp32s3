@@ -994,6 +994,7 @@ static play_result_t play_station(int idx)
     bool audio_started = false;
     int empty_runs = 0;
     int skipped = 0;
+    int write_fails = 0;
     play_result_t result = PLAY_STOPPED;
     set_status("缓冲中…");
 
@@ -1096,7 +1097,14 @@ static play_result_t play_station(int idx)
         MP3FrameInfo fi;
         MP3GetLastFrameInfo(s_dec, &fi);
         if (!audio_started && fi.samprate > 0) {
-            bsp_audio_start(fi.samprate);
+            /* 启动失败必须停台报错：老代码忽略返回值继续解码，
+               bsp_audio_write 恒失败 —— 界面显示「播放中」但全程无声。 */
+            if (bsp_audio_start(fi.samprate) != ESP_OK) {
+                set_status("音频启动失败");
+                ui_show_action(title, "音频硬件不可用");
+                result = PLAY_ERROR;
+                break;
+            }
             audio_started = true;
             char sub[48];
             snprintf(sub, sizeof(sub), "播放中 %dHz %s",
@@ -1114,7 +1122,17 @@ static play_result_t play_station(int idx)
                 s_pcm[2 * i + 1] = s_pcm[i];
             }
         }
-        bsp_audio_write(s_pcm, frames * 2);
+        /* 连续写失败（音频通道没起来）要停台，不能假装在播 */
+        if (bsp_audio_write(s_pcm, frames * 2) != ESP_OK) {
+            if (++write_fails > 8) {
+                set_status("音频输出失败");
+                ui_show_action(title, "音频输出异常，请重试");
+                result = PLAY_ERROR;
+                break;
+            }
+        } else {
+            write_fails = 0;
+        }
 
         if (consumed > 0) {
             memmove(s_buf, s_buf + consumed, s_len - consumed);

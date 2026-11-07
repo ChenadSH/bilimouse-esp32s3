@@ -353,8 +353,17 @@ static void on_ui_button(ui_button_t btn, void *ctx)
 static void perform_action(action_t action)
 {
     if (!hid_device_is_ready()) {
-        ui_show_action(action_label(action), "未连接");
-        ESP_LOGW(TAG, "action skipped: not connected");
+        /* 提示要区分「根本没连」和「连上了但配对/订阅没完成」：
+           蓝牙已连的情况下还显示「未连接」，用户会以为要重新配对，
+           其实只是加密链路还没就绪，等 1~2 秒就好。 */
+        const char *sub = "未连接";
+        switch (hid_device_state()) {
+        case HID_STATE_CONNECTING: sub = "配对中，请稍候"; break;
+        case HID_STATE_READY:      sub = "等待主机订阅输入"; break;
+        default: break;
+        }
+        ui_show_action(action_label(action), sub);
+        ESP_LOGW(TAG, "action skipped: not ready (state=%d)", (int)hid_device_state());
         return;
     }
 
