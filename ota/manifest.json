@@ -1,1 +1,1 @@
-{"version": "2.7.5", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.7.5/ota/bilimouse.bin", "notes": "OTA\u591a\u6e90+\u8fdb\u5ea6\u53cd\u9988\uff1b\u4feemacOS\u91cd\u8fde\u540e\u70b9\u51fb/\u53cc\u51fb/\u53f3\u952e\u5931\u6548", "size": 1929792}
+{"version": "2.7.6", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.7.6/ota/bilimouse.bin", "notes": "OTA\u591a\u6e90(\u542bgh-proxy\u53cd\u4ee3)+\u8fdb\u5ea6\u53cd\u9988\uff1b\u4feemacOS\u91cd\u8fde\u540e\u70b9\u51fb/\u53cc\u51fb/\u53f3\u952e\u5931\u6548", "size": 1929840}
