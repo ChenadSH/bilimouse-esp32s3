@@ -1,1 +1,1 @@
-{"version": "2.7.7", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.7.7/ota/bilimouse.bin", "notes": "\u4fee\u7535\u53f0\uff1aMP3\u89e3\u7801\u6b7b\u5faa\u73af/\u9009\u53f0\u53d8\u505c\u64ad/302\u4e0d\u8ddf\u968f/\u53f0\u5217\u8868\u9519\u914d", "size": 1932656}
+{"version": "2.7.8", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.7.8/ota/bilimouse.bin", "notes": "修蓝牙重连后显示未连接/鼠标失灵(绑定主机静默加密不触发AUTH_CMPL)；修电台播放无声(i2s通道未使能)；修红外学习秒失败(RMT空完成)+发射崩溃隐患", "size": 1933536}
