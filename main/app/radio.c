@@ -191,88 +191,355 @@ static bool was_played(const char *url)
 
 /* ==================== 台列表拉取 ==================== */
 
-/** 把 JSON 里的 \" \/ 还原成普通字符 */
+/** 把 JSON 字符串里的转义还原。
+ *
+ *  以前只处理 \" 和 \/：带鉴权参数的流地址里常见 \u0026（&），
+ *  不还原就会拿一个带字面量 "\u0026" 的 URL 去请求，服务器回 400/403。 */
 static void json_unescape(char *s)
 {
     char *w = s;
     while (*s) {
-        if (s[0] == '\\' && (s[1] == '"' || s[1] == '/')) {
-            s++;
+        if (*s != '\\' || s[1] == '\0') {
+            *w++ = *s++;
+            continue;
         }
-        *w++ = *s++;
+        switch (s[1]) {
+        case '"':  *w++ = '"';  s += 2; break;
+        case '\\': *w++ = '\\'; s += 2; break;
+        case '/':  *w++ = '/';  s += 2; break;
+        case 'n':  *w++ = '\n'; s += 2; break;
+        case 'r':  *w++ = '\r'; s += 2; break;
+        case 't':  *w++ = '\t'; s += 2; break;
+        case 'b':  *w++ = '\b'; s += 2; break;
+        case 'f':  *w++ = '\f'; s += 2; break;
+        case 'u': {
+            unsigned cp = 0;
+            bool ok = true;
+            for (int i = 0; i < 4; i++) {
+                char h = s[2 + i];
+                unsigned v;
+                if (h >= '0' && h <= '9') v = (unsigned)(h - '0');
+                else if (h >= 'a' && h <= 'f') v = (unsigned)(h - 'a' + 10);
+                else if (h >= 'A' && h <= 'F') v = (unsigned)(h - 'A' + 10);
+                else { ok = false; break; }
+                cp = cp * 16 + v;
+            }
+            if (!ok) {                 /* 假转义：原样保留反斜杠 */
+                *w++ = *s++;
+                break;
+            }
+            s += 6;
+            /* UTF-16 代理对（\uD83D\uDE00 这类）合成一个码点 */
+            if (cp >= 0xD800 && cp <= 0xDBFF && s[0] == '\\' && s[1] == 'u') {
+                unsigned lo = 0;
+                bool ok2 = true;
+                for (int i = 0; i < 4; i++) {
+                    char h = s[2 + i];
+                    unsigned v;
+                    if (h >= '0' && h <= '9') v = (unsigned)(h - '0');
+                    else if (h >= 'a' && h <= 'f') v = (unsigned)(h - 'a' + 10);
+                    else if (h >= 'A' && h <= 'F') v = (unsigned)(h - 'A' + 10);
+                    else { ok2 = false; break; }
+                    lo = lo * 16 + v;
+                }
+                if (ok2 && lo >= 0xDC00 && lo <= 0xDFFF) {
+                    cp = 0x10000u + ((cp - 0xD800u) << 10) + (lo - 0xDC00u);
+                    s += 6;
+                }
+            }
+            if (cp < 0x80) {
+                *w++ = (char)cp;
+            } else if (cp < 0x800) {
+                *w++ = (char)(0xC0 | (cp >> 6));
+                *w++ = (char)(0x80 | (cp & 0x3F));
+            } else if (cp < 0x10000) {
+                *w++ = (char)(0xE0 | (cp >> 12));
+                *w++ = (char)(0x80 | ((cp >> 6) & 0x3F));
+                *w++ = (char)(0x80 | (cp & 0x3F));
+            } else {
+                *w++ = (char)(0xF0 | (cp >> 18));
+                *w++ = (char)(0x80 | ((cp >> 12) & 0x3F));
+                *w++ = (char)(0x80 | ((cp >> 6) & 0x3F));
+                *w++ = (char)(0x80 | (cp & 0x3F));
+            }
+            break;
+        }
+        default:
+            *w++ = *s++;               /* 未知转义：保留原字符 */
+            break;
+        }
     }
     *w = '\0';
 }
 
-/** 提取 "name"（不会误匹配 "name_en"）与 "stream_url" 字段对。
- *  解析到 dst 暂存区，*out_cnt 返回条数；调用方确认成功后再整体替换。 */
+static const char *json_skip_ws(const char *p)
+{
+    while (*p && (unsigned char)*p <= ' ') {
+        p++;
+    }
+    return p;
+}
+
+/** p 指向开引号；start/len 返回内容（不含引号），返回闭引号之后的位置 */
+static const char *json_scan_string(const char *p, const char **start, int *len)
+{
+    if (*p != '"') {
+        return NULL;
+    }
+    const char *s = p + 1;
+    const char *q = s;
+    while (*q) {
+        if (*q == '\\' && q[1]) {
+            q += 2;
+            continue;
+        }
+        if (*q == '"') {
+            *start = s;
+            *len = (int)(q - s);
+            return q + 1;
+        }
+        q++;
+    }
+    return NULL;
+}
+
+/** 跳过一个 JSON 值（字符串/对象/数组/数字/字面量），返回其后位置 */
+static const char *json_skip_value(const char *p)
+{
+    p = json_skip_ws(p);
+    if (*p == '"') {
+        const char *s;
+        int l;
+        return json_scan_string(p, &s, &l);
+    }
+    if (*p == '{' || *p == '[') {
+        int depth = 0;
+        bool in_str = false;
+        while (*p) {
+            if (in_str) {
+                if (*p == '\\' && p[1]) {
+                    p += 2;
+                    continue;
+                }
+                if (*p == '"') {
+                    in_str = false;
+                }
+            } else if (*p == '"') {
+                in_str = true;
+            } else if (*p == '{' || *p == '[') {
+                depth++;
+            } else if (*p == '}' || *p == ']') {
+                if (--depth == 0) {
+                    return p + 1;
+                }
+            }
+            p++;
+        }
+        return NULL;
+    }
+    while (*p && *p != ',' && *p != '}' && *p != ']') {
+        p++;
+    }
+    return p;
+}
+
+/**
+ * 解析单个电台对象。p 指向 '{'，返回对象结束（'}' 之后）的位置。
+ *
+ * 逐键取值、按对象边界收尾 —— 老实现是「从 name 的结束引号往后
+ * strstr("stream_url")」，一旦某个对象缺 stream_url（或键序反了），
+ * 就会把**下一个台**的地址张冠李戴，整张列表全部错位。
+ */
+static const char *parse_station_obj(const char *p, char *name, size_t name_cap,
+                                     char *url, size_t url_cap)
+{
+    const char *q = p + 1;
+    for (;;) {
+        q = json_skip_ws(q);
+        if (*q == ',') {
+            q++;
+            continue;
+        }
+        if (*q == '}' || *q == '\0') {
+            q += (*q == '}');
+            break;
+        }
+        if (*q != '"') {          /* 结构异常：放弃这个对象 */
+            break;
+        }
+
+        const char *ks;
+        int kl;
+        const char *next = json_scan_string(q, &ks, &kl);
+        if (!next) {
+            break;
+        }
+        q = json_skip_ws(next);
+        if (*q != ':') {
+            break;
+        }
+        q = json_skip_ws(q + 1);
+
+        bool is_name = (kl == 4 && strncmp(ks, "name", 4) == 0);
+        bool is_url = (kl == 10 && strncmp(ks, "stream_url", 10) == 0) ||
+                      (kl == 3 && strncmp(ks, "url", 3) == 0);
+
+        if (is_name || is_url) {
+            const char *vs;
+            int vl;
+            const char *ve = (*q == '"') ? json_scan_string(q, &vs, &vl) : NULL;
+            if (ve && vl > 0) {
+                char *out = is_name ? name : url;
+                size_t cap = is_name ? name_cap : url_cap;
+                size_t n = (size_t)vl < cap - 1 ? (size_t)vl : cap - 1;
+                memcpy(out, vs, n);
+                out[n] = '\0';
+                json_unescape(out);
+            }
+            q = ve ? ve : json_skip_value(q);
+        } else {
+            q = json_skip_value(q);
+        }
+        if (!q) {
+            break;
+        }
+    }
+    return q;
+}
+
+/**
+ * 解析台列表。支持 `{"radio_stations":[...]}` 和裸数组两种形态。
+ *
+ * 只接受 MP3 直连台：Helix 只能解 MP3，国内 m3u8 直播基本都是
+ * AAC/TS，收进来只会播两秒就报「不是 MP3 编码」——那正是「拉完在线
+ * 列表反而全部不能播」的原因。全部条目都被滤掉时返回失败，调用方
+ * 保留内置可用台，绝不用一份播不了的列表覆盖掉能播的。
+ */
 static esp_err_t parse_stations(char *body, radio_station_t *dst, int *out_cnt)
 {
     int cnt = 0;
-    const char *p = body;
-    while (cnt < RADIO_MAX_STATIONS && (p = strstr(p, "\"name\""))) {
-        const char *n = strchr(p + 6, '"');
-        if (!n) break;
-        n++;
-        const char *ne = strchr(n, '"');
-        if (!ne) break;
-        const char *u = strstr(ne, "\"stream_url\"");
-        if (!u) break;
-        u = strchr(u + 12, '"');
-        if (!u) break;
-        u++;
-        const char *ue = strchr(u, '"');
-        if (!ue) break;
+    int skipped_hls = 0;
+    const char *p = strchr(body, '[');
 
-        int nl = ne - n, ul = ue - u;
-        if (nl > 0 && ul > 0 && nl < (int)sizeof(dst[cnt].name) &&
-            ul < (int)sizeof(dst[cnt].url)) {
-            memcpy(dst[cnt].name, n, nl);
-            dst[cnt].name[nl] = '\0';
-            memcpy(dst[cnt].url, u, ul);
-            dst[cnt].url[ul] = '\0';
-            json_unescape(dst[cnt].url);
-            ESP_LOGI(TAG, "station[%d] %s | %s", cnt, dst[cnt].name, dst[cnt].url);
-            cnt++;
-        }
-        p = ue;
+    if (!p) {                      /* 没有数组：当成单对象列表 */
+        p = body;
+    } else {
+        p++;
     }
+
+    while (*p) {
+        p = json_skip_ws(p);
+        if (*p == ']') {
+            break;
+        }
+        if (*p == ',') {
+            p++;
+            continue;
+        }
+        if (*p != '{') {           /* 数组里的非对象元素：整段跳过 */
+            const char *n = json_skip_value(p);
+            if (!n || n <= p) {
+                break;
+            }
+            p = n;
+            continue;
+        }
+
+        char name[sizeof(dst[0].name)] = {0};
+        char url[sizeof(dst[0].url)] = {0};
+        const char *n = parse_station_obj(p, name, sizeof(name), url, sizeof(url));
+        if (!n || n <= p) {
+            break;
+        }
+        p = n;
+
+        if (!name[0] || !url[0]) {
+            continue;
+        }
+        if (strstr(url, ".m3u8")) {
+            skipped_hls++;
+            ESP_LOGW(TAG, "skip hls station '%s' (helix decodes mp3 only)", name);
+            continue;
+        }
+        if (cnt >= RADIO_MAX_STATIONS) {
+            break;
+        }
+        strlcpy(dst[cnt].name, name, sizeof(dst[cnt].name));
+        strlcpy(dst[cnt].url, url, sizeof(dst[cnt].url));
+        ESP_LOGI(TAG, "station[%d] %s | %s", cnt, dst[cnt].name, dst[cnt].url);
+        cnt++;
+    }
+
     *out_cnt = cnt;
-    return cnt ? ESP_OK : ESP_ERR_NOT_FOUND;
+    if (cnt == 0) {
+        ESP_LOGW(TAG, "no playable mp3 station (hls skipped: %d)", skipped_hls);
+        return ESP_ERR_NOT_FOUND;
+    }
+    return ESP_OK;
 }
 
-static esp_err_t radio_fetch_list_one(const char *url)
+static esp_err_t radio_fetch_list_one(const char *url_in)
 {
-    esp_http_client_config_t cfg = {
-        .url = url,
-        .timeout_ms = 8000,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-    };
-    esp_http_client_handle_t cli = esp_http_client_init(&cfg);
-    if (!cli) {
-        return ESP_FAIL;
-    }
-    esp_err_t err = esp_http_client_open(cli, 0);
-    if (err != ESP_OK) {
-        esp_http_client_cleanup(cli);
-        return err;
-    }
-    esp_http_client_fetch_headers(cli);
-    int code = esp_http_client_get_status_code(cli);
+    char url[512];
+    strlcpy(url, url_in, sizeof(url));
 
-    /* ⚠️ 这里必须用 sizeof(s_http_body)，不能用 sizeof(body)：
-       body 是 char* 指针，sizeof(body) 恒等于 4（指针大小），
-       于是循环只会读进 3 个字节就退出 -> JSON 被截断 -> 解析不到任何台。
-       这就是「电台读不到列表」的根因。 */
+    int code = 0;
+    int n = 0;
     char *body = s_http_body;
     const size_t cap = sizeof(s_http_body);
-    int n = 0, r;
-    while (n < (int)cap - 1 &&
-           (r = esp_http_client_read(cli, body + n, cap - 1 - n)) > 0) {
-        n += r;
+    body[0] = '\0';
+
+    /* 跟随 301/302（jsDelivr / releases 会跳）；手动 open 模式下
+       esp_http_client 不会自己跟，必须自己解析 Location 重开。 */
+    for (int hop = 0; hop < 3; hop++) {
+        esp_http_client_config_t cfg = {
+            .url = url,
+            .timeout_ms = 8000,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+        };
+        esp_http_client_handle_t cli = esp_http_client_init(&cfg);
+        if (!cli) {
+            return ESP_FAIL;
+        }
+        esp_err_t err = esp_http_client_open(cli, 0);
+        if (err != ESP_OK) {
+            esp_http_client_cleanup(cli);
+            return err;
+        }
+        esp_http_client_fetch_headers(cli);
+        code = esp_http_client_get_status_code(cli);
+
+        if (code == 301 || code == 302 || code == 303 ||
+            code == 307 || code == 308) {
+            char next[512] = {0};
+            esp_err_t red = esp_http_client_set_redirection(cli);
+            if (red == ESP_OK) {
+                esp_http_client_get_url(cli, next, sizeof(next));
+            }
+            esp_http_client_cleanup(cli);
+            if (red != ESP_OK || !next[0]) {
+                return ESP_ERR_NOT_FOUND;
+            }
+            ESP_LOGI(TAG, "station list redirect %d -> %.60s", code, next);
+            strlcpy(url, next, sizeof(url));
+            continue;
+        }
+
+        /* ⚠️ 这里必须用 sizeof(s_http_body)，不能用 sizeof(body)：
+           body 是 char* 指针，sizeof(body) 恒等于 4（指针大小），
+           于是循环只会读进 3 个字节就退出 -> JSON 被截断 -> 解析不到任何台。
+           这就是「电台读不到列表」的根因。 */
+        n = 0;
+        int r;
+        while (n < (int)cap - 1 &&
+               (r = esp_http_client_read(cli, body + n, cap - 1 - n)) > 0) {
+            n += r;
+        }
+        esp_http_client_cleanup(cli);
+        body[n] = '\0';
+        break;
     }
-    esp_http_client_cleanup(cli);
-    body[n] = '\0';
+
     if (code != 200) {
         ESP_LOGW(TAG, "station list http %d (%d bytes)", code, n);
         return ESP_ERR_NOT_FOUND;
@@ -331,20 +598,185 @@ static void src_close_cli(src_t *s)
     }
 }
 
-/** 相对地址 -> 绝对地址（只处理最常见的「同目录相对」） */
+/**
+ * 相对地址 -> 绝对地址（RFC 3986 简化版）。
+ *
+ * 老实现直接 strrchr(base,'/') 截断，两个坑：
+ *   1. base 带 query（.../index.m3u8?token=abc/123）时，最后一个 '/' 落在
+ *      参数里面，拼出来的分段地址完全非法；
+ *   2. rel 是根路径（/live/seg1.ts）时会拼成 http://host/dir//live/seg1.ts。
+ * 现在先剥离 base 的 query/fragment，再按「绝对 / 协议相对 / 根路径 / 同目录」
+ * 分别处理，并吃掉开头的 ./ 与 ../。
+ */
 static void resolve_url(const char *base, const char *rel, char *out, int outlen)
 {
-    if (strncasecmp(rel, "http", 4) == 0) {
+    if (strncasecmp(rel, "http://", 7) == 0 || strncasecmp(rel, "https://", 8) == 0) {
         strlcpy(out, rel, outlen);
         return;
     }
-    strlcpy(out, base, outlen);
-    char *slash = strrchr(out, '/');
-    if (slash) {
-        *slash = '\0';
+
+    /* scheme://authority 前缀 */
+    char prefix[160] = {0};
+    const char *path = "";
+    size_t plen = 0;
+    const char *auth = strstr(base, "://");
+    if (auth) {
+        auth += 3;
+        const char *slash = strchr(auth, '/');
+        size_t n = slash ? (size_t)(slash - base) : strlen(base);
+        if (n >= sizeof(prefix)) {
+            n = sizeof(prefix) - 1;
+        }
+        memcpy(prefix, base, n);
+        prefix[n] = '\0';
+        if (slash) {
+            path = slash;
+            plen = strlen(slash);
+        } else {
+            path = "/";
+            plen = 1;
+        }
+    } else {
+        strlcpy(prefix, base, sizeof(prefix));
+        path = base;
+        plen = strlen(base);
     }
-    strlcat(out, "/", outlen);
-    strlcat(out, rel, outlen);
+
+    /* 协议相对：//host/path */
+    if (rel[0] == '/' && rel[1] == '/') {
+        const char *c = strstr(prefix, "://");
+        char sch[8] = "http";
+        if (c) {
+            size_t n = (size_t)(c - prefix);
+            if (n >= sizeof(sch)) {
+                n = sizeof(sch) - 1;
+            }
+            memcpy(sch, prefix, n);
+            sch[n] = '\0';
+        }
+        snprintf(out, (size_t)outlen, "%s:%s", sch, rel);
+        return;
+    }
+
+    /* base 的 path 去掉 query / fragment */
+    char dir[RADIO_URL_MAX];
+    size_t keep = 0;
+    for (size_t i = 0; i < plen && i < sizeof(dir) - 1; i++) {
+        if (path[i] == '?' || path[i] == '#') {
+            break;
+        }
+        dir[i] = path[i];
+        keep = i + 1;
+    }
+    dir[keep] = '\0';
+
+    if (rel[0] == '/') {
+        /* 根路径相对：直接用 authority + rel */
+        snprintf(out, (size_t)outlen, "%s%s", prefix, rel);
+        return;
+    }
+
+    /* 同目录相对：保留到最后一个 '/'（含） */
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        slash[1] = '\0';
+    } else {
+        strlcpy(dir, "/", sizeof(dir));
+    }
+
+    const char *r = rel;
+    for (;;) {
+        if (r[0] == '.' && r[1] == '/') {
+            r += 2;
+            continue;
+        }
+        if (r[0] == '.' && r[1] == '.' && r[2] == '/') {
+            r += 3;
+            /* dir 现在形如 "/a/b/"：先去掉尾斜杠，再砍掉最后一段 */
+            size_t dl = strlen(dir);
+            if (dl > 1) {
+                if (dir[dl - 1] == '/') {
+                    dir[--dl] = '\0';
+                }
+                char *prev = strrchr(dir, '/');
+                if (prev) {
+                    prev[1] = '\0';
+                } else {
+                    strlcpy(dir, "/", sizeof(dir));
+                }
+            }
+            continue;
+        }
+        break;
+    }
+    snprintf(out, (size_t)outlen, "%s%s%s", prefix, dir, r);
+}
+
+/**
+ * 打开一个流式 HTTP 连接：跟随 301/302/303/307/308，且只接受 200。
+ *
+ * ⚠️ 手动流模式（open -> fetch_headers -> read）下 esp_http_client
+ * **不会**自动跟随重定向，也不会替我们判状态码。蜻蜓/CDN 经常先回 302，
+ * 老代码把 302 的 HTML 错误页当 MP3 数据喂给解码器，播两秒就报
+ * 「直播中断，连接断开」。
+ *
+ * 注意：Location 在响应解析阶段已存进 client->location，
+ * 用 set_redirection + get_url 取（响应头默认不保存，
+ * esp_http_client_get_response_header 需开 SAVE_RESPONSE_HEADERS）。
+ */
+static esp_err_t stream_open(src_t *s, const char *url, char *final, size_t final_len)
+{
+    char cur[512];
+    strlcpy(cur, url, sizeof(cur));
+
+    for (int hop = 0; hop < 5; hop++) {
+        esp_http_client_config_t cfg = {
+            .url = cur,
+            /* 首跳是 DNS+TLS 握手，3s 太紧（实测蜻蜓握手 1.5~2.5s） */
+            .timeout_ms = 6000,
+            .buffer_size = 4096,
+            .keep_alive_enable = false,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+        };
+        s->cli = esp_http_client_init(&cfg);
+        if (!s->cli) {
+            return ESP_FAIL;
+        }
+        if (esp_http_client_open(s->cli, 0) != ESP_OK) {
+            src_close_cli(s);
+            return ESP_FAIL;
+        }
+        esp_http_client_fetch_headers(s->cli);
+        int code = esp_http_client_get_status_code(s->cli);
+
+        if (code == 200) {
+            if (final && final_len) {
+                strlcpy(final, cur, final_len);
+            }
+            return ESP_OK;
+        }
+
+        bool redirect = (code == 301 || code == 302 || code == 303 ||
+                         code == 307 || code == 308);
+        if (!redirect) {
+            ESP_LOGW(TAG, "stream http %d -> %.70s", code, cur);
+            src_close_cli(s);
+            return ESP_FAIL;
+        }
+
+        char next[512] = {0};
+        esp_err_t red = esp_http_client_set_redirection(s->cli);
+        if (red == ESP_OK) {
+            esp_http_client_get_url(s->cli, next, sizeof(next));
+        }
+        src_close_cli(s);
+        if (red != ESP_OK || !next[0]) {
+            return ESP_FAIL;
+        }
+        strlcpy(cur, next, sizeof(cur));
+        ESP_LOGI(TAG, "stream redirect %d -> %.70s", code, cur);
+    }
+    return ESP_FAIL;
 }
 
 /** 拉 playlist 文本。返回 0=media playlist, 1=master(redirect 填入), -1=失败 */
@@ -365,6 +797,14 @@ static int fetch_playlist(const char *url, char *segs, int max_segs, int *seg_cn
         return -1;
     }
     esp_http_client_fetch_headers(cli);
+    int code = esp_http_client_get_status_code(cli);
+    if (code != 200) {
+        /* 302/403 的响应体是 HTML 错误页，当 playlist 解析只会得到
+           一堆垃圾分段地址，不如直接判失败换源 */
+        ESP_LOGW(TAG, "playlist http %d", code);
+        esp_http_client_cleanup(cli);
+        return -1;
+    }
 
     /* 用独立缓冲：电台列表刷新任务可能同时在写 s_http_body */
     char *text = s_pl_body;
@@ -413,31 +853,18 @@ static esp_err_t src_open(src_t *s, const char *url)
 {
     memset(s, 0, sizeof(*s));
     s->hls = (strstr(url, ".m3u8") != NULL);
-    if (!s->hls) {
-        esp_http_client_config_t cfg = {
-            .url = url,
-            /* 蜻蜓的 HTTPS 握手可能超过 1s：之前 timeout 1000ms 连接
-               直接失败，表现为「连接失败」。3s 兼顾握手与停播响应。 */
-            .timeout_ms = 3000,
-            .buffer_size = 4096,
-            .keep_alive_enable = false,
-            .crt_bundle_attach = esp_crt_bundle_attach,
-        };
-        s->cli = esp_http_client_init(&cfg);
-        if (!s->cli) {
-            return ESP_FAIL;
-        }
-        if (esp_http_client_open(s->cli, 0) != ESP_OK) {
-            src_close_cli(s);
-            return ESP_FAIL;
-        }
-        esp_http_client_fetch_headers(s->cli);
-        strlcpy(s->base, url, sizeof(s->base));
+    strlcpy(s->base, url, sizeof(s->base));
+    if (s->hls) {
+        /* HLS： playlist 稍后按需解析 */
+        s->need_playlist = true;
         return ESP_OK;
     }
-    /* HLS： playlist 稍后按需解析 */
-    strlcpy(s->base, url, sizeof(s->base));
-    s->need_playlist = true;
+    char final[RADIO_URL_MAX];
+    esp_err_t e = stream_open(s, url, final, sizeof(final));
+    if (e != ESP_OK) {
+        return e;
+    }
+    strlcpy(s->base, final, sizeof(s->base));
     return ESP_OK;
 }
 
@@ -473,19 +900,11 @@ static esp_err_t src_hls_next_segment(src_t *s)
     mark_played(seg);
     ESP_LOGI(TAG, "hls segment %d/%d", s->seg_pos, s->seg_cnt);
 
-    esp_http_client_config_t cfg = {
-        .url = seg,
-        .timeout_ms = 1000,
-        .buffer_size = 4096,
-        .keep_alive_enable = false,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-    };
-    s->cli = esp_http_client_init(&cfg);
-    if (!s->cli || esp_http_client_open(s->cli, 0) != ESP_OK) {
-        src_close_cli(s);
+    /* 分段同样可能 302（CDN 节点）且必须校验状态码：
+       原来 1000ms 超时 + 不判状态码，HTTPS 分段几乎必然失败。 */
+    if (stream_open(s, seg, NULL, 0) != ESP_OK) {
         return ESP_FAIL;
     }
-    esp_http_client_fetch_headers(s->cli);
     return ESP_OK;
 }
 
@@ -532,6 +951,22 @@ typedef enum {
     PLAY_ERROR,      /* 连接/解码失败 */
 } play_result_t;
 
+/* 解码失败时最多允许跳过多少字节的垃圾再判定「不是 MP3」。
+   64KB 足够吃掉 ID3 标签 / TS 包头 / ICY 头；真遇到 AAC 流
+   （ADTS 也是 0xFFF? 同步字，但帧头解析必失败）会很快超限。 */
+#define SKIP_LIMIT  (64 * 1024)
+
+/** 在缓冲里找 MP3 帧同步字（0xFF 后跟 3 个 1，即 0xE0 掩码），返回偏移或 -1 */
+static int find_sync(const uint8_t *b, int n)
+{
+    for (int i = 0; i + 1 < n; i++) {
+        if (b[i] == 0xFF && (b[i + 1] & 0xE0) == 0xE0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 static play_result_t play_station(int idx)
 {
     src_t src;
@@ -557,15 +992,26 @@ static play_result_t play_station(int idx)
     }
 
     bool audio_started = false;
-    int empty_runs = 0, err_runs = 0;
+    int empty_runs = 0;
+    int skipped = 0;
     play_result_t result = PLAY_STOPPED;
     set_status("缓冲中…");
 
     while (true) {
         /* 帧边界处理请求（换台/停止最迟约 26ms 响应） */
-        if (s_req == REQ_TOGGLE || s_req == REQ_SELECT) {
+        if (s_req == REQ_TOGGLE) {
             s_req = REQ_NONE;
             result = PLAY_STOPPED;
+            break;
+        }
+        /* 电台列表点选：切到新台继续播，不能当成「停止」。
+           以前两者合在一个分支里且都置 PLAY_STOPPED，点一下列表就停播，
+           而 radio_task 里那句 `if (s_req == REQ_SELECT) continue;`
+           因为 s_req 已被清成 REQ_NONE 永远不成立。 */
+        if (s_req == REQ_SELECT) {
+            s_req = REQ_NONE;
+            show_station("切换中…");
+            result = PLAY_SWITCHED;
             break;
         }
         if (s_req == REQ_NEXT || s_req == REQ_PREV) {
@@ -614,12 +1060,30 @@ static play_result_t play_station(int idx)
         int consumed = s_len - left;
         if (err != ERR_MP3_NONE) {
             if (consumed > 0) {
+                /* 解码器自己跳过了若干字节（前导垃圾 / 半截帧） */
                 memmove(s_buf, s_buf + consumed, s_len - consumed);
                 s_len -= consumed;
             } else {
-                s_len--;    /* 逐字节滑动找帧同步 */
+                /* ⚠️ 必须丢**头部**字节。老代码写的是 s_len--（丢尾部），
+                   s_buf[0] 始终不变 -> MP3Decode 在同一位置反复报同一个
+                   错误，空转 4000 次后误报「流不是 MP3 编码」。
+                   这里一次跳到下一个候选同步字，ID3 标签 / TS 包头几百
+                   字节内就能跳过，而不是一字节一字节地磨。 */
+                int off = (s_len > 1) ? find_sync(s_buf + 1, s_len - 1) : -1;
+                int drop = (off >= 0) ? off + 1 : (s_len > 1 ? s_len - 1 : s_len);
+                if (drop < 1) {
+                    drop = 1;
+                }
+                if (drop > s_len) {
+                    drop = s_len;
+                }
+                memmove(s_buf, s_buf + drop, s_len - drop);
+                s_len -= drop;
+                skipped += drop;
             }
-            if (++err_runs > 4000) {
+            /* 只有「一直没解出任何一帧」才判死；已经在播时的零星
+               同步错误（TS 包头等）直接跳过，不能因此停台。 */
+            if (!audio_started && skipped > SKIP_LIMIT) {
                 set_status("解码失败");
                 ui_show_action(title, "流不是 MP3 编码，试试其他台");
                 result = PLAY_ERROR;
@@ -627,7 +1091,7 @@ static play_result_t play_station(int idx)
             }
             continue;
         }
-        err_runs = 0;
+        skipped = 0;
 
         MP3FrameInfo fi;
         MP3GetLastFrameInfo(s_dec, &fi);
@@ -725,7 +1189,9 @@ static void radio_task(void *arg)
                 break;
             }
         }
-        /* 播放中点了台列表选台：立即重新进入播放（新台已写入 s_cur） */
+        /* 选台的常规路径已在 play_station 内返回 PLAY_SWITCHED 由上面的
+           循环接续；这里只兜住「刚好在 play_station 返回后才按到选台」的
+           竞态：否则会被下面的收尾逻辑改写成「已停止」。 */
         if (s_req == REQ_SELECT) {
             continue;
         }
