@@ -15,6 +15,12 @@ static const char *TAG = "bsp_lcd";
 #define LCD_BL_LEDC_MODE LEDC_LOW_SPEED_MODE
 #define LCD_BL_LEDC_RES  LEDC_TIMER_8_BIT
 
+/* esp_lcd SPI 事务队列深度。必须是 1 —— 详见 bsp_lcd_init 里的说明。
+   v2.7.2 曾误设为 0，导致首次刷屏就永久阻塞在看门狗里（黑屏重启循环）。 */
+#define LCD_IO_QUEUE_DEPTH 1
+_Static_assert(LCD_IO_QUEUE_DEPTH >= 1,
+               "trans_queue_depth=0 会让 esp_lcd 永久阻塞在 get_trans_result");
+
 static bool s_bl_configured;
 
 static esp_err_t lcd_backlight_init(void)
@@ -86,12 +92,16 @@ esp_err_t bsp_lcd_init(bsp_lcd_t *lcd)
         .dc_gpio_num = BSP_LCD_PIN_DC,
         .spi_mode = 0,
         .pclk_hz = 40 * 1000 * 1000,
-        /* ⚠️ 必须 0（同步发送）：>0 时 esp_lcd 走 spi_device_queue_trans，
-           draw_bitmap 立即返回而 DMA 还在后台读帧缓冲 —— UI 任务紧接着
-           画下一帧会改写还没传完的数据，屏幕撕裂花屏（电台页整帧背景图
-           高频重绘时最明显）。同步模式下每条 4 行只有 ~100us 阻塞，
-           一帧 60 条共几毫秒，20fps 完全够。 */
-        .trans_queue_depth = 0,
+        /* ⚠️ 必须是 1。三个值的实测结论：
+           - 0：非法。esp_lcd_panel_io_spi.c 里 `num_trans_inflight < queue_size`
+                恒为假，第一次刷屏就落到 else 分支执行
+                spi_device_get_trans_result(portMAX_DELAY) —— 队列里根本没有
+                待完成事务，于是永久阻塞 -> app_main 卡死 -> 看门狗复位 ->
+                黑屏 + 无限重启（连一帧都没发出去，所以屏幕全无反应）。
+           - 1：每次调用都必然等上一次传完才入队，天然同步，只占 1 个 descriptor。
+           - >1：draw_bitmap 立即返回而 DMA 还在后台读帧缓冲，UI 下一帧改写
+                同一块内存 -> 撕裂花屏（电台整帧背景重绘最明显，v2.7.1 的老问题）。 */
+        .trans_queue_depth = LCD_IO_QUEUE_DEPTH,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
     };
