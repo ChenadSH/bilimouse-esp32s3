@@ -1,1 +1,1 @@
-{"version": "2.7.4", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.7.4/ota/bilimouse.bin", "notes": "\u4fee\u590dv2.7.2\u8d77\u9ed1\u5c4f\u65e0\u9650\u91cd\u542f\uff1aLCD trans_queue_depth 0->1", "size": 1929104}
+{"version": "2.7.5", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.7.5/ota/bilimouse.bin", "notes": "OTA\u591a\u6e90+\u8fdb\u5ea6\u53cd\u9988\uff1b\u4feemacOS\u91cd\u8fde\u540e\u70b9\u51fb/\u53cc\u51fb/\u53f3\u952e\u5931\u6548", "size": 1929792}
