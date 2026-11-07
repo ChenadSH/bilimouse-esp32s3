@@ -31,6 +31,7 @@
 #include "nvs_flash.h"
 
 #include "actions.h"
+#include "bsp_audio.h"
 #include "bsp_button.h"
 #include "bsp_imu.h"
 #include "bsp_touch.h"
@@ -287,8 +288,15 @@ static void on_ui_button(ui_button_t btn, void *ctx)
         ui_show_action("选择电台", "点台名直接播放");
         break;
     case UI_BTN_RADIO_LIST_BACK:
+        /* 台列表是电台页的子页：返回电台播放页，并把台名/状态卡片刷回来 */
         ui_set_mode(UI_MODE_RADIO);
-        ui_show_action("电台", "已返回");
+        radio_refresh();
+        break;
+    case UI_BTN_RADIO_VOL_DOWN:
+        radio_volume(bsp_audio_volume_get() - 10);
+        break;
+    case UI_BTN_RADIO_VOL_UP:
+        radio_volume(bsp_audio_volume_get() + 10);
         break;
 
     /* 台列表点行选台（UI_BTN_RADIO_PICK0..7）：
@@ -607,14 +615,17 @@ static void touch_task(void *arg)
                     moved = 0;
 
                     /* 左右键是「按住型」：按下立即发 down，抬起才发 up。
-                       这样按住后往中间拖 = 拖拽/框选，和真实鼠标一致。 */
+                       这样按住后往中间拖 = 拖拽/框选，和真实鼠标一致。
+                       右键用 Ctrl+左键模拟：macOS 全局把 Control+点击 视为右键，
+                       且对第三方 BLE 鼠标的 button2 报告根本不响应。 */
                     if (pressed_btn == UI_BTN_MOUSE_LEFT) {
                         hold_btn = HID_MOUSE_BTN_LEFT;
                         hid_mouse_button(hold_btn, true);
                         ui_show_hint("左键按住中");
                     } else if (pressed_btn == UI_BTN_MOUSE_RIGHT) {
                         hold_btn = HID_MOUSE_BTN_RIGHT;
-                        hid_mouse_button(hold_btn, true);
+                        hid_keyboard_modifier(HID_MOD_CTRL, true);
+                        hid_mouse_button(HID_MOUSE_BTN_LEFT, true);
                         ui_show_hint("右键按住中");
                     }
 #if TOUCH_DEBUG
@@ -636,6 +647,17 @@ static void touch_task(void *arg)
                     int32_t dx = (int32_t)(sx - last_x);
                     int32_t dy = (int32_t)(sy - last_y);
                     int32_t mag = (dx > 0 ? dx : -dx) + (dy > 0 ? dy : -dy);
+                    /* ⚠️ 按住左/右键期间的抖动抑制：触摸采样本身有 ±2px 噪声，
+                       按住按钮时每次采样都带着 mask!=0 的位移发给主机，
+                       macOS 把「按下期间有位移」判成拖拽 —— 单击永远失效。
+                       累计位移没到 8px 之前一个字节都不发（last_x/y 不更新，
+                       真拖动时首次发送会带上累计位移，不会丢）。 */
+                    if (hold_btn && moved < 8 && mag < 8) {
+                        moved += (uint32_t)mag;
+                        was_pressed = true;
+                        vTaskDelay(pdMS_TO_TICKS(power_mgr_display_on() ? 20 : 150));
+                        continue;
+                    }
                     if (dx || dy) {
                         /* ⚠️ moved 必须累计原始像素，不能累计乘过增益的位移：
                            上一版在这里累加了 3 倍值，手指 4 像素的抖动就把
@@ -679,8 +701,13 @@ static void touch_task(void *arg)
                     }
                     home_gesture = false;
                 } else if (hold_btn) {
-                    /* 松开左右键 */
-                    hid_mouse_button(hold_btn, false);
+                    /* 松开左右键（右键是 Ctrl+左键模拟，两个都要松） */
+                    if (hold_btn == HID_MOUSE_BTN_RIGHT) {
+                        hid_mouse_button(HID_MOUSE_BTN_LEFT, false);
+                        hid_keyboard_modifier(HID_MOD_CTRL, false);
+                    } else {
+                        hid_mouse_button(hold_btn, false);
+                    }
                     ui_show_hint(hold_btn == HID_MOUSE_BTN_LEFT ? "左键已松开" : "右键已松开");
                     hold_btn = 0;
                 } else if (on_button && pressed_btn != UI_BTN_NONE) {

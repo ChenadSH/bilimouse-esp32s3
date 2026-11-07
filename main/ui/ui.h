@@ -92,6 +92,8 @@ typedef enum {
     UI_BTN_RADIO_PICK5,
     UI_BTN_RADIO_PICK6,
     UI_BTN_RADIO_PICK7,
+    UI_BTN_RADIO_VOL_DOWN,   /* 电台音量- */
+    UI_BTN_RADIO_VOL_UP,     /* 电台音量+ */
     /* 鼠标模式：左右键（按下=按住，抬起=松开，可拖拽） */
     UI_BTN_MOUSE_LEFT,       /* 左键 */
     UI_BTN_MOUSE_RIGHT,      /* 右键 */

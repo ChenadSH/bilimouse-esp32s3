@@ -69,7 +69,9 @@ static const radio_station_t s_default_stations[] = {
 
 #define BUF_CAP      (32 * 1024)
 #define HIGH_WATER   (BUF_CAP - 8 * 1024)   /* 高于此值暂停网络读 */
-#define DECODE_MIN   2048                    /* 至少攒这么多再解码 */
+/* 起播前至少攒这么多再解码。64kbps 流 1152B ≈ 150ms 数据，
+   够 Helix 找到同步字并解出头一帧；再大的值只会白白推迟出声时间。 */
+#define DECODE_MIN   1152
 #define READ_CHUNK   4096
 /* 拉列表任务堆栈：任务是 HTTPS（mbedtls 握手要 6~8KB），5KB 会栈溢出。
    之前「台列表读不到/进电台就崩」的帮凶之一。 */
@@ -730,17 +732,21 @@ static esp_err_t stream_open(src_t *s, const char *url, char *final, size_t fina
     strlcpy(cur, url, sizeof(cur));
 
     for (int hop = 0; hop < 5; hop++) {
-        esp_http_client_config_t cfg = {
-            .url = cur,
-            /* 首跳是 DNS+TLS 握手，3s 太紧（实测蜻蜓握手 1.5~2.5s） */
-            .timeout_ms = 6000,
-            .buffer_size = 4096,
-            .keep_alive_enable = false,
-            .crt_bundle_attach = esp_crt_bundle_attach,
-        };
-        s->cli = esp_http_client_init(&cfg);
         if (!s->cli) {
-            return ESP_FAIL;
+            esp_http_client_config_t cfg = {
+                .url = cur,
+                /* 首跳是 DNS+TLS 握手，3s 太紧（实测蜻蜓握手 1.5~2.5s） */
+                .timeout_ms = 6000,
+                .buffer_size = 4096,
+                /* 同主机的重定向跳（CDN 调度很常见）复用同一条 TLS 连接，
+                   每省一次握手 ≈ 省 1.5~2.5s —— 这是「切台慢」的大头。 */
+                .keep_alive_enable = true,
+                .crt_bundle_attach = esp_crt_bundle_attach,
+            };
+            s->cli = esp_http_client_init(&cfg);
+            if (!s->cli) {
+                return ESP_FAIL;
+            }
         }
         if (esp_http_client_open(s->cli, 0) != ESP_OK) {
             src_close_cli(s);
@@ -769,12 +775,30 @@ static esp_err_t stream_open(src_t *s, const char *url, char *final, size_t fina
         if (red == ESP_OK) {
             esp_http_client_get_url(s->cli, next, sizeof(next));
         }
-        src_close_cli(s);
         if (red != ESP_OK || !next[0]) {
+            src_close_cli(s);
             return ESP_FAIL;
         }
+
+        /* 比较新旧主机：同主机保连接（esp_http_client_open 会复用），
+           换主机才销毁重建 */
+        bool same_host = false;
+        const char *old_h = strstr(cur, "://");
+        const char *new_h = strstr(next, "://");
+        if (old_h && new_h) {
+            old_h += 3; new_h += 3;
+            const char *oe = strchr(old_h, '/');
+            const char *ne = strchr(new_h, '/');
+            size_t ol = oe ? (size_t)(oe - old_h) : strlen(old_h);
+            size_t nl = ne ? (size_t)(ne - new_h) : strlen(new_h);
+            same_host = (ol == nl && strncasecmp(old_h, new_h, ol) == 0);
+        }
+        if (!same_host) {
+            src_close_cli(s);
+        }
         strlcpy(cur, next, sizeof(cur));
-        ESP_LOGI(TAG, "stream redirect %d -> %.70s", code, cur);
+        ESP_LOGI(TAG, "stream redirect %d -> %.70s (%s)", code, cur,
+                 same_host ? "reuse conn" : "new conn");
     }
     return ESP_FAIL;
 }
@@ -1366,9 +1390,14 @@ void radio_stop(void)
 void radio_volume(int vol)
 {
     bsp_audio_volume_set(vol);
-    char sub[24];
-    snprintf(sub, sizeof(sub), "电台音量 %d%%", vol);
-    ui_set_footer(sub);
+    /* 电台页不画 footer，音量数值由 ui.c 常驻绘制，这里只需触发重绘 */
+    ui_mark_dirty();
+}
+
+/** 台列表「返回」回电台播放页时，把台名/状态卡片刷新回来 */
+void radio_refresh(void)
+{
+    show_station(s_status[0] ? s_status : "待播放");
 }
 
 /* ==================== 串口命令 ==================== */

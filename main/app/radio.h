@@ -59,6 +59,9 @@ void radio_stop(void);
 /** 电台音量 0~100（存 NVS） */
 void radio_volume(int vol);
 
+/** 从台列表返回电台播放页时刷新台名/状态卡片 */
+void radio_refresh(void);
+
 /** 注册串口命令：radio list|play <n>|stop|vol <0-100>|update */
 void radio_register_cli(void);
 

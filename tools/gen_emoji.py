@@ -28,13 +28,14 @@ SIZE = 72          # 输出边长（像素）：首页磁贴 96，emoji 贴 72 �
 
 # icon 顺序 = 首页轮播顺序
 #   name, emoji, 磁贴底色(RGB), 描边色(RGB)
+# 配色走「深底 + 低饱和宝石色描边」：克制、统一、有质感
 ICONS = [
-    ("bili",  "\U0001F4FA", (18, 38, 74),  (86, 156, 255)),   # 📺 B站视频控制
-    ("mouse", "\U0001F5B1", (14, 52, 44),  (60, 200, 150)),   # 🖱 鼠标模拟
-    ("ir",    "\U0001F4E1", (68, 26, 42),  (255, 120, 150)),  # 📡 红外模拟
-    ("radio", "\U0001F3B5", (44, 26, 74),  (170, 130, 255)),  # 🎵 网络电台
-    ("ota",   "\U0001F504", (16, 54, 66),  (70, 200, 230)),   # 🔄 在线升级
-    ("cal",   "\U0001F3AF", (66, 42, 16),  (250, 180, 70)),   # 🎯 触摸校准
+    ("bili",  "\U0001F4FA", (16, 24, 44),  (92, 144, 250)),   # 📺 B站视频控制
+    ("mouse", "\U0001F5B1", (12, 34, 30),  (56, 186, 148)),   # 🖱 鼠标模拟
+    ("ir",    "\U0001F4E1", (40, 20, 30),  (228, 108, 132)),  # 📡 红外模拟
+    ("radio", "\U0001F3B5", (26, 20, 48),  (152, 116, 240)),  # 🎵 网络电台
+    ("ota",   "\U0001F504", (12, 32, 40),  (64, 182, 212)),   # 🔄 在线升级
+    ("cal",   "\U0001F3AF", (38, 26, 12),  (232, 170, 76)),   # 🎯 触摸校准
 ]
 
 
@@ -43,7 +44,13 @@ def rgb565(r, g, b):
 
 
 def render(ch, tile_bg):
-    """渲染单个 emoji -> (SIZE*SIZE) RGB565 列表（已按磁贴底色预合成）"""
+    """渲染单个 emoji -> (SIZE*SIZE) RGB565 列表（已按磁贴底色预合成）
+
+    两个抗白边措施：
+      1. alpha 预乘后再 LANCZOS 缩放：非预乘缩放会把边缘半透明的
+         浅色像素按权重卷积进结果，合成到深色磁贴上就是一圈白边/白点；
+      2. 去孤立亮点：被磁贴色四面包围的高亮像素（缩放残余）压回磁贴色。
+    """
     font = ImageFont.truetype(EMOJI_FONT, SIZE)
     img = Image.new("RGBA", (SIZE * 2, SIZE * 2), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -51,15 +58,57 @@ def render(ch, tile_bg):
     bbox = img.getbbox()
     if bbox:
         img = img.crop(bbox)
-    # 等比缩放到 SIZE 内并居中
-    scale = min(SIZE / img.width, SIZE / img.height)
-    nw, nh = max(1, int(img.width * scale)), max(1, int(img.height * scale))
-    img = img.resize((nw, nh), Image.LANCZOS)
 
+    # alpha 预乘
+    src = img.load()
+    prem = Image.new("RGBA", img.size)
+    dst = prem.load()
+    for yy in range(img.height):
+        for xx in range(img.width):
+            r, g, b, a = src[xx, yy]
+            dst[xx, yy] = (r * a // 255, g * a // 255, b * a // 255, a)
+
+    # 等比缩放到 SIZE 内并居中
+    scale = min(SIZE / prem.width, SIZE / prem.height)
+    nw, nh = max(1, int(prem.width * scale)), max(1, int(prem.height * scale))
+    prem = prem.resize((nw, nh), Image.LANCZOS)
+
+    # 预乘色直接叠加：out = prem + tile * (1 - a)
     out = Image.new("RGB", (SIZE, SIZE), tile_bg)
-    out.paste(img, ((SIZE - nw) // 2, (SIZE - nh) // 2), img)
-    px = out.load()
-    return [rgb565(*px[x, y]) for y in range(SIZE) for x in range(SIZE)]
+    opx = out.load()
+    ox, oy = (SIZE - nw) // 2, (SIZE - nh) // 2
+    for yy in range(nh):
+        for xx in range(nw):
+            r, g, b, a = prem.getpixel((xx, yy))
+            tr, tg, tb = opx[ox + xx, oy + yy]
+            ia = 255 - a
+            opx[ox + xx, oy + yy] = (r + tr * ia // 255,
+                                     g + tg * ia // 255,
+                                     b + tb * ia // 255)
+
+    # 去孤立亮点：上下左右都是磁贴色而自身明显更亮的像素
+    def is_tile(c):
+        return (abs(c[0] - tile_bg[0]) < 12 and
+                abs(c[1] - tile_bg[1]) < 12 and
+                abs(c[2] - tile_bg[2]) < 12)
+    for yy in range(1, SIZE - 1):
+        for xx in range(1, SIZE - 1):
+            c = opx[xx, yy]
+            if sum(c) - sum(tile_bg) > 240 and \
+                    is_tile(opx[xx - 1, yy]) and is_tile(opx[xx + 1, yy]) and \
+                    is_tile(opx[xx, yy - 1]) and is_tile(opx[xx, yy + 1]):
+                opx[xx, yy] = tile_bg
+
+    # 亮白柔化：低饱和的高亮像素（emoji 自带的纯白区域）压成冷灰白，
+    # 深底磁贴上纯白太刺眼，也会显得像「白点」
+    for yy in range(SIZE):
+        for xx in range(SIZE):
+            c = opx[xx, yy]
+            mx, mn = max(c), min(c)
+            if mx > 200 and (mx - mn) < 25:
+                opx[xx, yy] = (int(c[0] * 0.82), int(c[1] * 0.84), int(c[2] * 0.90))
+
+    return [rgb565(*opx[x, y]) for y in range(SIZE) for x in range(SIZE)]
 
 
 def main():

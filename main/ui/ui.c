@@ -30,6 +30,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "bsp_audio.h"
 #include "bsp_lcd.h"
 #include "ui_font.h"
 #include "ui_emoji.h"
@@ -44,9 +45,9 @@ static const char *TAG = "ui";
 #define SCR_W   320
 #define SCR_H   240
 
-/* 颜色 (RGB565) */
-#define COL_BG          0x0861   /* 深蓝黑背景 */
-#define COL_PANEL       0x10E3   /* 面板底色 */
+/* 颜色 (RGB565) —— 深空灰底 + 雾蓝面板 + 亮蓝强调，克制低饱和 */
+#define COL_BG          0x0842   /* 深空灰背景 (8,10,18) */
+#define COL_PANEL       0x18E4   /* 雾灰面板 (24,28,32) */
 #define COL_ACCENT      0x2D7F   /* 强调色（B 站蓝） */
 #define COL_TEXT        0xFFFF   /* 主文字白 */
 #define COL_SUBTEXT     0x8410   /* 次文字灰 */
@@ -126,10 +127,12 @@ static const btn_def_t s_ir_btns[] = {
 #define RADIO_BTN_Y  104
 
 static const btn_def_t s_radio_btns[] = {
-    { UI_BTN_RADIO_PREV,    10,  RADIO_BTN_Y,      94, 46, "上一台",   COL_ACCENT },
-    { UI_BTN_RADIO_TOGGLE, 112,  RADIO_BTN_Y,      94, 46, "播放/停止", COL_ACCENT },
-    { UI_BTN_RADIO_NEXT,   214,  RADIO_BTN_Y,      94, 46, "下一台",   COL_ACCENT },
-    { UI_BTN_RADIO_LIST,    10,  RADIO_BTN_Y + 54, 298, 40, "台列表",  COL_SUBTEXT },
+    { UI_BTN_RADIO_PREV,     10,  RADIO_BTN_Y,      94, 46, "上一台",   COL_ACCENT },
+    { UI_BTN_RADIO_TOGGLE,  112,  RADIO_BTN_Y,      94, 46, "播放/停止", COL_ACCENT },
+    { UI_BTN_RADIO_NEXT,    214,  RADIO_BTN_Y,      94, 46, "下一台",   COL_ACCENT },
+    { UI_BTN_RADIO_LIST,     10,  RADIO_BTN_Y + 54,  98, 40, "台列表",  COL_SUBTEXT },
+    { UI_BTN_RADIO_VOL_DOWN, 112, RADIO_BTN_Y + 54,  98, 40, "音量-",   COL_SUBTEXT },
+    { UI_BTN_RADIO_VOL_UP,   214, RADIO_BTN_Y + 54,  98, 40, "音量+",   COL_SUBTEXT },
 };
 
 #define RADIO_BTN_CNT (sizeof(s_radio_btns) / sizeof(s_radio_btns[0]))
@@ -768,11 +771,17 @@ static void redraw(void)
         draw_action_card();
         draw_btn_group(s_ir_btns, IR_BTN_CNT);
         break;
-    case UI_MODE_RADIO:
+    case UI_MODE_RADIO: {
         /* 电台页：半透明动作卡片显示台名/状态（radio.c 会写进来） */
         draw_action_card_in(10, 300, s_btn_alpha);
         draw_btn_group(s_radio_btns, RADIO_BTN_CNT);
+        /* 当前音量常驻显示（电台页没有 footer，音量反馈只能画在这里） */
+        char vol_txt[16];
+        snprintf(vol_txt, sizeof(vol_txt), "音量 %d%%", bsp_audio_volume_get());
+        int vw = text_width(vol_txt);
+        draw_text((SCR_W - vw) / 2, 210, vol_txt, COL_SUBTEXT, 120);
         break;
+    }
     case UI_MODE_RADIO_LIST:
         draw_radio_list();
         break;
@@ -800,13 +809,22 @@ static void redraw(void)
        得先拷一份）。整帧 320*240*2=150KB，运行期内部 RAM 只剩几 KB，
        分配必然失败 —— 串口刷屏 "spicommon_dma_setup_priv_buffer
        Failed to allocate priv TX buffer"，屏幕上画面停住不动。
-       每条 4 行 = 320*4*2 = 2560 字节，能塞进当前最大的 4KB 内部块；
-       整帧 60 条，SPI 80MHz 下总耗时只有几毫秒量级。 */
-    #define FLUSH_ROWS 4
+       每条 2 行 = 320*2*2 = 1280 字节：电台播放时 WiFi/TLS 把内部 RAM
+       吃到最大块不足 2KB，4 行（2560B）分配失败 → 该条纹被丢弃 →
+       屏幕上出现横条残影/花屏。2 行几乎总能分配成功，失败时延迟重试一次。 */
+    #define FLUSH_ROWS 2
     for (int y = 0; y < SCR_H; y += FLUSH_ROWS) {
         int h = (y + FLUSH_ROWS <= SCR_H) ? FLUSH_ROWS : (SCR_H - y);
-        esp_lcd_panel_draw_bitmap(s_lcd.panel, 0, y, SCR_W, y + h,
-                                  s_buf + (size_t)y * SCR_W);
+        esp_err_t ferr = esp_lcd_panel_draw_bitmap(s_lcd.panel, 0, y, SCR_W, y + h,
+                                                   s_buf + (size_t)y * SCR_W);
+        if (ferr != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(2));
+            ferr = esp_lcd_panel_draw_bitmap(s_lcd.panel, 0, y, SCR_W, y + h,
+                                             s_buf + (size_t)y * SCR_W);
+            if (ferr != ESP_OK) {
+                ESP_LOGW(TAG, "flush stripe y=%d failed: %s", y, esp_err_to_name(ferr));
+            }
+        }
     }
     s_dirty = false;
 }
@@ -844,9 +862,11 @@ ui_button_t ui_hit_test(uint16_t x, uint16_t y)
         }
         return UI_BTN_NONE;
     }
-    /* 非首页：点顶部状态栏 = 返回首页（全设备统一的返回入口） */
+    /* 非首页：点顶部状态栏 = 返回。
+       台列表是电台页的子页，返回应回到电台播放页而不是首页；
+       其余页面统一回首页。 */
     if (y < HEADER_H) {
-        return UI_BTN_HOME;
+        return (s_mode == UI_MODE_RADIO_LIST) ? UI_BTN_RADIO_LIST_BACK : UI_BTN_HOME;
     }
     if (s_mode == UI_MODE_CALIBRATE) {
         return hit_group(s_cal_btns, CAL_BTN_CNT, x, y);

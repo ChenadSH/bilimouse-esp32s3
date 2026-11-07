@@ -1,1 +1,1 @@
-{"version": "2.7.8", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.7.8/ota/bilimouse.bin", "notes": "修蓝牙重连后显示未连接/鼠标失灵(绑定主机静默加密不触发AUTH_CMPL)；修电台播放无声(i2s通道未使能)；修红外学习秒失败(RMT空完成)+发射崩溃隐患", "size": 1933536}
+{"version": "2.7.9", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.7.9/ota/bilimouse.bin", "notes": "台列表选台后返回电台播放页；电台页新增音量加减和常驻音量显示；修电台背景花屏(DMA分条缩到2行)；修鼠标左右键点击失效(按住抖动抑制+右键Ctrl+左键模拟)；首页emoji去白边白点、配色升级；切台提速(重定向复用连接+减小起播缓冲)", "size": 1934240}
