@@ -1,1 +1,1 @@
-{"version": "2.7.3", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.7.3/ota/bilimouse.bin", "notes": "\u4fee\u590d\u5907\u7528WiFi\u65e0\u6cd5\u5207\u6362+\u4ed3\u5e93\u8865bootloader/\u5206\u533a\u8868\uff0cesptool\u5355\u70e7app\u4e0d\u518d\u9ed1\u5c4f", "size": 1929104}
+{"version": "2.7.4", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.7.4/ota/bilimouse.bin", "notes": "\u4fee\u590dv2.7.2\u8d77\u9ed1\u5c4f\u65e0\u9650\u91cd\u542f\uff1aLCD trans_queue_depth 0->1", "size": 1929104}
