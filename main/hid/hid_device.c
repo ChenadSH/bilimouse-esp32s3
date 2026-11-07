@@ -88,7 +88,10 @@ static esp_ble_adv_data_t s_adv_data = {
        22 + 6 = 28，虽然还够，但纯属浪费广播空间且无实际作用 */
     .min_interval = 0,
     .max_interval = 0,
-    .appearance = 0x03c0,      /* HID Generic */
+    /* 0x03C2 = HID Mouse（0x03C0 是 Generic HID）。
+       macOS 会按 Appearance 决定挂哪个 HID profile / 显示什么图标，
+       声明成 Generic 时辅助点按(右键)等鼠标专属行为可能不被启用。 */
+    .appearance = ESP_BLE_APPEARANCE_HID_MOUSE,
     .manufacturer_len = 0,
     .p_manufacturer_data = NULL,
     .service_data_len = 0,
@@ -120,6 +123,38 @@ static void start_advertising(void)
     esp_err_t err = esp_ble_gap_start_advertising(&s_adv_params);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "start advertising failed: %s", esp_err_to_name(err));
+    }
+}
+
+/**
+ * 向主机请求「短连接间隔」——鼠标点击能不能被识别，几乎全看这一步。
+ *
+ * ⚠️ 历史坑：这里以前用的是 esp_ble_gap_set_prefer_conn_params()。
+ *    那个函数只是把参数写进 GAP 服务里的 PPCP 特征值（供主机来读），
+ *    **不会对已建立的连接发起任何更新请求**。于是主机一直沿用自己
+ *    想要的间隔（实测 macOS 会给到 30~45ms），而我们日志里看着像"已设置"。
+ *    正确做法是 esp_ble_gap_update_conn_params()：主动发 L2CAP 参数更新请求。
+ *
+ * 参数取值按 Apple《Accessory Design Guidelines》：
+ *   最小间隔 >= 15ms（12×1.25），最大间隔 >= 最小 + 15ms（24×1.25 = 30ms）
+ *   latency = 0：按下和抬起必须落在相邻的连接事件里，跳过事件会让
+ *   macOS 把 down/up 折叠成"什么都没发生"（点不动 / 双击变单击）。
+ */
+static void request_fast_conn_params(void)
+{
+    esp_ble_conn_update_params_t cp;
+    memset(&cp, 0, sizeof(cp));
+    memcpy(cp.bda, s_peer_bda, sizeof(esp_bd_addr_t));
+    cp.min_int = 12;    /* 15.0ms */
+    cp.max_int = 24;    /* 30.0ms */
+    cp.latency = 0;
+    cp.timeout = 400;   /* 4s：Apple 要求 >= 2s 且不能过长 */
+
+    esp_err_t err = esp_ble_gap_update_conn_params(&cp);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "conn param update request failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "requested conn interval 15~30ms (latency 0)");
     }
 }
 
@@ -165,12 +200,8 @@ static void hidd_event_callback(esp_hidd_cb_event_t event, esp_hidd_cb_param_t *
         s_pair_failed = false;
         s_state = HID_STATE_CONNECTING;
 
-        /* 鼠标要求低延迟；主机可以拒绝，失败不影响功能 */
-        esp_ble_gap_set_prefer_conn_params(s_peer_bda,
-                                          ESP_BLE_GAP_CONN_ITVL_MS(7.5),
-                                          ESP_BLE_GAP_CONN_ITVL_MS(15),
-                                          0,
-                                          ESP_BLE_GAP_SUPERVISION_TIMEOUT_MS(4000));
+        /* 连接参数更新请求放到配对完成后再发（见 AUTH_CMPL）。
+           刚连上就发，主机正忙着服务发现，多数会直接忽略。 */
         break;
 
     case ESP_HIDD_EVENT_BLE_DISCONNECT:
@@ -242,7 +273,19 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
             s_secure = true;
             s_auth_fail = 0;
             s_pair_failed = false;
+
+            /* ⚠️ 这里必须把订阅状态补成 true（曾经「重连后全部按键失灵」的根因）：
+               按 HCI/ATT 规范，绑定设备的 CCCD 订阅状态由从机保存，主机重连后
+               不再重写 CCCD。只有「首次配对」时 macOS 才会写一次。
+               于是重连后 s_report_enabled 一直是 false，
+               hid_device_is_ready() 恒为假 —— 屏幕显示"已就绪"，
+               但 click / move 全部在第一行就 return 了。
+               加密完成即代表这是一条已绑定的可信链路，直接置位。 */
+            s_report_enabled = true;
             s_state = HID_STATE_READY;
+
+            /* 加密完成 = 主机已完成服务发现，此时请求短连接间隔才有意义 */
+            request_fast_conn_params();
         } else {
             uint8_t reason = param->ble_security.auth_cmpl.fail_reason;
             ESP_LOGE(TAG, "pairing failed, reason=0x%x — 若电脑上还存着旧的配对记录，"
@@ -522,11 +565,20 @@ void hid_device_service(void)
     }
 }
 
+/* 合成点击正在进行（按下尚未松开）—— 这段时间必须禁止任何位移，
+   否则 macOS 会把这次点击判成 0 像素的拖拽，单击/双击全部失效。 */
+static volatile bool s_click_busy = false;
+
 /* ================= 鼠标 ================= */
 esp_err_t hid_mouse_move(int8_t dx, int8_t dy)
 {
     if (!hid_device_is_ready()) {
         return ESP_ERR_INVALID_STATE;
+    }
+    if (s_click_busy) {
+        /* 点击窗口（<50ms）内的位移直接丢弃：丢几帧手感几乎看不出来，
+           但混进一次 dx!=0 就会让整次点击变成拖拽。 */
+        return ESP_OK;
     }
     /* 带上当前按住的按键状态：否则拖动时主机认为按键已松开，
        表现为「按住拖不动 / 拖到一半选中被取消」。 */
@@ -618,34 +670,50 @@ esp_err_t hid_mouse_scroll(int8_t wheel)
     return ESP_OK;
 }
 
+/**
+ * 单击时按键按住的时长（毫秒）。
+ *
+ * 原来是 120ms，那是「双击永远出不来的」主要原因之一：
+ *   第1次 down(0) -> up(120) -> 手指抬起再按(约 +120ms) -> 第2次 down(240)
+ *   -> up(360)，两次点击的节奏被拉长到 350ms 以上，macOS 直接判成
+ *   两次独立单击。
+ * 45ms 足以跨越 2~3 个连接事件（间隔 15~30ms），down 和 up 不会被折叠，
+ * 又不会拖慢双击节奏。
+ */
+#define CLICK_HOLD_MS 45
+
 esp_err_t hid_mouse_click(uint8_t button)
 {
     if (!hid_device_is_ready()) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (s_click_busy) {
+        return ESP_OK;   /* 上一次点击还没发完，合并掉，避免 down/down/up 乱序 */
+    }
+    s_click_busy = true;
+
     /*
      * 一次可靠的单击 = 纯按键报告 down -> 保持 -> up，零位移。
      *
-     * 必须满足的条件（历史上每一环都踩过）：
+     * 关键点（历史上每一环都踩过）：
      *   1. 报告长度必须等于描述符声明的字节数（本工程 4 字节）。
-     *   2. 按下保持 >= 120ms。两个原因：
-     *      a) 真实鼠标一次点击的按下时长就是 80~120ms；
-     *      b) 若 down/up 落进同一个 BLE 连接事件，Apple 主机会把它们
-     *         折叠成"什么都没发生"（实测笔记 espkvm 证实）。我们请求的
-     *         连接间隔是 7.5~15ms，但主机有权拒绝；保持 120ms 保证
-     *         即使间隔被谈到 50ms，down 和 up 也分属不同连接事件。
-     *   3. 不能带位移：Apple 把"按住期间有位移"归为拖拽（曾经的
-     *      ±1px 抖动就是这样把点击变成 0px 拖拽的）。
+     *   2. down 必须同步写进 s_btn_mask：否则点击期间任何一次
+     *      hid_mouse_move() 都会带着 mask=0 发出去，等于把按键提前松开
+     *      （主机收到 up，后面的 up 就变成无效包 -> 点了没反应）。
+     *   3. 不能带位移：Apple 把"按住期间有位移"归为拖拽。
+     *      现在由 s_click_busy 在 hid_mouse_move() 里整体拦掉。
      */
-    esp_gap_conn_params_t cp;
-    if (esp_ble_get_current_conn_params(s_peer_bda, &cp) == ESP_OK) {
-        ESP_LOGD(TAG, "click: conn interval %.2fms, btn=0x%02x",
-                 cp.interval * 1.25f, button);
-    }
-    esp_hidd_send_mouse_value(s_conn_id, button, 0, 0);
-    vTaskDelay(pdMS_TO_TICKS(120));
-    esp_hidd_send_mouse_value(s_conn_id, 0, 0, 0);
-    ESP_LOGI(TAG, "mouse click btn=0x%02x", button);
+    uint8_t prev = s_btn_mask;
+    s_btn_mask |= button;
+    esp_hidd_send_mouse_value(s_conn_id, s_btn_mask, 0, 0);
+
+    vTaskDelay(pdMS_TO_TICKS(CLICK_HOLD_MS));
+
+    s_btn_mask = (uint8_t)(prev & (uint8_t)~button);
+    esp_hidd_send_mouse_value(s_conn_id, s_btn_mask, 0, 0);
+
+    s_click_busy = false;
+    ESP_LOGI(TAG, "mouse click btn=0x%02x (%dms)", button, CLICK_HOLD_MS);
     return ESP_OK;
 }
 

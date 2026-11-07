@@ -393,7 +393,11 @@ static esp_gatts_attr_db_t hidd_le_gatt_db[HIDD_LE_IDX_NB] =
                                                                        NULL}},
 
     [HIDD_LE_IDX_REPORT_MOUSE_IN_CCC]        = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid,
-                                                                      (ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE),
+                                                                      /* 加密后才能读写：HID 输入报告的订阅必须发生在
+                                                                         加密链路上（Apple 也是这么要求的）。
+                                                                         三个 CCCD 的权限必须一致，否则 macOS 会怀疑
+                                                                         设备安全性，出现"配对成功但收不到报告"。 */
+                                                                      (ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED),
                                                                       sizeof(uint16_t), 0,
                                                                       NULL}},
 
@@ -413,7 +417,8 @@ static esp_gatts_attr_db_t hidd_le_gatt_db[HIDD_LE_IDX_NB] =
                                                                        NULL}},
     // Report KEY INPUT Characteristic - Client Characteristic Configuration Descriptor
     [HIDD_LE_IDX_REPORT_KEY_IN_CCC]              = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid,
-                                                                      (ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE),
+                                                                      /* 与鼠标 CCCD 保持一致：全部加密读写 */
+                                                                      (ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED),
                                                                       sizeof(uint16_t), 0,
                                                                       NULL}},
      // Report Characteristic - Report Reference Descriptor
@@ -539,7 +544,10 @@ void esp_hidd_prf_cb_hdl(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
 {
     switch(event) {
         case ESP_GATTS_REG_EVT: {
-            esp_ble_gap_config_local_icon (ESP_BLE_APPEARANCE_GENERIC_HID);
+            /* 本地图标 / Appearance 声明成「鼠标」而不是「通用 HID」：
+               macOS 依据它决定挂哪套 HID profile，声明成 Generic 时
+               右键（辅助点按）等鼠标专属行为可能不被启用。 */
+            esp_ble_gap_config_local_icon (ESP_BLE_APPEARANCE_HID_MOUSE);
             esp_hidd_cb_param_t hidd_param;
             hidd_param.init_finish.state = param->reg.status;
             if(param->reg.app_id == HIDD_APP_ID) {
@@ -776,7 +784,9 @@ static void hid_add_id_tbl(void)
       hid_rpt_map[0].id = hidReportRefMouseIn[0];
       hid_rpt_map[0].type = hidReportRefMouseIn[1];
       hid_rpt_map[0].handle = hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_REPORT_MOUSE_IN_VAL];
-      hid_rpt_map[0].cccdHandle = hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_REPORT_MOUSE_IN_VAL];
+      /* 原来是 MOUSE_IN_VAL（报告值句柄），笔误：cccHandle 指向 CCCD 才能
+         查到"主机是否订阅"的正确属性（键盘/consumer 两条都用的 _CCC）。 */
+      hid_rpt_map[0].cccdHandle = hidd_le_env.hidd_inst.att_tbl[HIDD_LE_IDX_REPORT_MOUSE_IN_CCC];
       hid_rpt_map[0].mode = HID_PROTOCOL_MODE_REPORT;
 
       // Key input report

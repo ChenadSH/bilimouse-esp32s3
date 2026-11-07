@@ -54,8 +54,9 @@ static volatile bool s_cred_switching;
 static esp_event_handler_instance_t s_ev_any;
 static esp_event_handler_instance_t s_ev_ip;
 
-/* 升级状态快照与 WiFi 步骤文案（定义见「状态快照」小节） */
+/* 升级状态快照与各步骤文案（定义见「状态快照」小节） */
 static void state_wifi(const char *txt);
+static void state_list(const char *txt);
 
 /** 断开原因 → 人能看懂的一句话。
  *  reason 是判断「连不上」到底卡在哪一层的唯一硬证据：
@@ -344,7 +345,9 @@ static esp_err_t http_resolve_url(const char *url_in, char *out, size_t outlen)
     for (int hop = 0; hop < 5; hop++) {
         esp_http_client_config_t cfg = {
             .url = url,
-            .timeout_ms = 8000,
+            /* 5s：单跳重定向只需要读到响应头，5s 已经足够。
+               原来 8s，多源串行时会把"卡着"的观感放大。 */
+            .timeout_ms = 5000,
             .buffer_size = 1024,
             .crt_bundle_attach = esp_crt_bundle_attach,
         };
@@ -443,7 +446,9 @@ static esp_err_t manifest_fetch_once(ota_manifest_t *m, const char *url)
 {
     esp_http_client_config_t cfg = {
         .url = url,
-        .timeout_ms = 10000,
+        /* 7s：TLS 握手 + 读一个 1KB 以内的 JSON。带证书包时握手本身
+           在纯软件大数运算下要 2~4s，7s 留足余量又不会让屏幕长时间不动。 */
+        .timeout_ms = 7000,
         .buffer_size = 2048,
         /* GitHub / gitee / 自建 HTTPS 都能过校验：证书包内置主流 CA 根证书。
            局域网 http:// 地址不受影响（bundle 只对 https 生效）。 */
@@ -513,40 +518,78 @@ static esp_err_t manifest_fetch_once(ota_manifest_t *m, const char *url)
     return ESP_OK;
 }
 
+/** 内置 manifest 源，按「国内可达性」排序。
+ *
+ *  为什么必须多源：releases/latest/download 会 302 到
+ *  objects.githubusercontent.com，raw.githubusercontent.com 也一样，
+ *  这两个域名在国内（尤其手机热点/公司访客网）经常被 DNS 污染或直接
+ *  超时。以前只有单源 + 3 次重试 × 10s，最坏 60 秒屏幕一动不动 ——
+ *  用户看到的就是「检查更新一直卡着」。
+ *
+ *  现在改成多源串行、每个源 5~7s 超时，屏上实时显示「第几个源」，
+ *  某个源不通立刻换下一个（jsDelivr 的国内可达性通常明显好于 raw）。 */
+static const char *const k_manifest_srcs[] = {
+    "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/master/ota/manifest.json",
+    "https://cdn.jsdelivr.net/gh/ChenadSH/bilimouse-esp32s3@master/ota/manifest.json",
+    "https://github.com/ChenadSH/bilimouse-esp32s3/releases/latest/download/manifest.json",
+};
+
 /**
- * manifest 获取（含重试）。
+ * manifest 获取（多源串行 + 每个源失败后换源）。
  *
  * GitHub 资产走 Azure Front Door CDN，它对 ESP-IDF 的 TLS 指纹有 bot
- * 防护，会**间歇性**返回 618 + XHTML 拒绝页（同一台设备，PC curl 是
- * 200）。不是每次都拒 —— 实测同一固件连跑几次，有的请求能拿到真
- * manifest。所以解析失败就整体重试，重试时 302 签名 URL 要重新解析。
+ * 防护，会**间歇性**返回 618 + XHTML 拒绝页；国内网络还会直接超时。
+ * 所以策略是「换域名」而不是「同一个域名死磕三次」。
  */
 static esp_err_t manifest_fetch(ota_manifest_t *m)
 {
-    char url[512];
-    if (!manifest_url_get(url, sizeof(url))) {
-        ESP_LOGW(TAG, "manifest url empty (serial: 'ota url <http://...>')");
-        return ESP_ERR_INVALID_STATE;
+    const char *srcs[4];
+    int n = 0;
+
+    /* NVS 里手动配的 URL（ota url ...）优先，便于自建镜像。
+       manifest_url_get() 在没配时返回编译期默认值，可能与下面的候选重复，
+       所以统一做一次去重。 */
+    char configured[512];
+    if (manifest_url_get(configured, sizeof(configured))) {
+        srcs[n++] = configured;
+    }
+    for (int i = 0; i < (int)(sizeof(k_manifest_srcs) / sizeof(k_manifest_srcs[0])) &&
+                    n < (int)(sizeof(srcs) / sizeof(srcs[0])); i++) {
+        bool dup = false;
+        for (int k = 0; k < n; k++) {
+            if (strcmp(srcs[k], k_manifest_srcs[i]) == 0) {
+                dup = true;
+            }
+        }
+        if (!dup) {
+            srcs[n++] = k_manifest_srcs[i];
+        }
     }
 
-    esp_err_t e = ESP_FAIL;
-    for (int attempt = 1; attempt <= 3; attempt++) {
+    esp_err_t last = ESP_FAIL;
+    for (int i = 0; i < n; i++) {
+        char txt[40];
+        /* 屏幕上必须能看出"在动"：卡在「获取中…」和卡在「获取中…(2/3)」
+           对用户是完全不同的体验，后者能证明固件还活着。 */
+        snprintf(txt, sizeof(txt), "获取中…(%d/%d)", i + 1, n);
+        state_list(txt);
+
         char resolved[512];
-        strlcpy(resolved, url, sizeof(resolved));
-        e = http_resolve_url(resolved, resolved, sizeof(resolved));
-        if (e == ESP_OK) {
-            e = manifest_fetch_once(m, resolved);
-        } else {
-            ESP_LOGW(TAG, "resolve manifest url failed: %s", esp_err_to_name(e));
+        strlcpy(resolved, srcs[i], sizeof(resolved));
+        last = http_resolve_url(resolved, resolved, sizeof(resolved));
+        if (last == ESP_OK) {
+            last = manifest_fetch_once(m, resolved);
         }
-        if (e == ESP_OK) {
+        if (last == ESP_OK) {
+            ESP_LOGI(TAG, "manifest ok from source %d/%d", i + 1, n);
             return ESP_OK;
         }
-        ESP_LOGW(TAG, "manifest attempt %d/3 failed: %s", attempt,
-                 esp_err_to_name(e));
-        vTaskDelay(pdMS_TO_TICKS(1500));
+        ESP_LOGW(TAG, "manifest source %d/%d failed: %s (%.60s)", i + 1, n,
+                 esp_err_to_name(last), srcs[i]);
+        snprintf(txt, sizeof(txt), "源%d失败", i + 1);
+        state_list(txt);
     }
-    return e;
+    return last;
 }
 
 /* ==================== 状态快照（UI 分步显示用） ==================== */
@@ -561,6 +604,9 @@ static bool s_manifest_valid;
 /* 检查/升级任务互斥（防止连点起多个任务抢 WiFi/flash） */
 static volatile bool s_task_busy;
 
+/* 收尾阶段的 WiFi 重连不更新屏上文案（否则会把检查结论刷掉） */
+static volatile bool s_wifi_quiet;
+
 void ota_update_get_state(ota_state_t *out)
 {
     if (out) {
@@ -571,22 +617,25 @@ void ota_update_get_state(ota_state_t *out)
 /** WiFi 步骤的实时文案（连哪个热点 / 是否连上） */
 static void state_wifi(const char *txt)
 {
+    /* 后台重连时不要覆盖屏幕上的结论（「已是最新」→「正在连 xxx」）。
+       检查结束后要把 WiFi 拉回来，那是收尾动作，用户不需要看。 */
+    if (s_wifi_quiet) {
+        return;
+    }
     strlcpy(s_state.wifi_info, txt, sizeof(s_state.wifi_info));
     ui_mark_dirty();
 }
 
-/** 下载 + 写 flash + 切启动分区。成功不返回（重启）。 */
-static esp_err_t ota_perform(void)
+/** 清单步骤的实时文案（正在试第几个源） */
+static void state_list(const char *txt)
 {
-    /* bin 地址同样可能是个 302 链（latest/download 固定链接），
-       先解析到真实的对象存储地址再交给 esp_https_ota */
-    char bin_url[512];
-    esp_err_t e = http_resolve_url(s_manifest.url, bin_url, sizeof(bin_url));
-    if (e != ESP_OK) {
-        ESP_LOGE(TAG, "resolve bin url failed: %s", esp_err_to_name(e));
-        return e;
-    }
+    strlcpy(s_state.list_info, txt, sizeof(s_state.list_info));
+    ui_mark_dirty();
+}
 
+/** 用已经解析好的最终地址下载 + 写 flash + 切启动分区。 */
+static esp_err_t ota_perform_url(const char *bin_url)
+{
     esp_http_client_config_t http_cfg = {
         .url = bin_url,
         .timeout_ms = 20000,
@@ -603,14 +652,15 @@ static esp_err_t ota_perform(void)
     s_state.percent = -1;
     ui_mark_dirty();
 
-    /* bin 下载同样可能被 CDN 的 bot 防护间歇性拒绝（618），失败重试 3 次。
-       begin 阶段就会做状态码检查（非 200 直接报错），中途断流则整体重来。 */
+    /* bin 下载同样可能被 CDN 的 bot 防护间歇性拒绝（618），失败重试。
+       原来重试 3 次，现在外层还会换源（jsDelivr / raw），
+       单源重试降到 2 次，避免「坏源上死磕 3 次 × 40s」把整体拖成几分钟。 */
     esp_err_t err = ESP_FAIL;
-    for (int attempt = 1; attempt <= 3; attempt++) {
+    for (int attempt = 1; attempt <= 2; attempt++) {
         h = NULL;
         err = esp_https_ota_begin(&ota_cfg, &h);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "ota begin failed (attempt %d/3): %s", attempt,
+            ESP_LOGW(TAG, "ota begin failed (attempt %d/2): %s", attempt,
                      esp_err_to_name(err));
             vTaskDelay(pdMS_TO_TICKS(1500));
             continue;
@@ -638,7 +688,7 @@ static esp_err_t ota_perform(void)
             vTaskDelay(pdMS_TO_TICKS(1));
         }
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "ota download failed (attempt %d/3): %s", attempt,
+            ESP_LOGW(TAG, "ota download failed (attempt %d/2): %s", attempt,
                      esp_err_to_name(err));
             esp_https_ota_abort(h);
             vTaskDelay(pdMS_TO_TICKS(1500));
@@ -647,7 +697,7 @@ static esp_err_t ota_perform(void)
 
         err = esp_https_ota_finish(h);   /* 内部已做镜像校验 + set_boot_partition */
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "ota finish failed (attempt %d/3): %s", attempt,
+            ESP_LOGW(TAG, "ota finish failed (attempt %d/2): %s", attempt,
                      esp_err_to_name(err));
             vTaskDelay(pdMS_TO_TICKS(1500));
             continue;
@@ -655,7 +705,7 @@ static esp_err_t ota_perform(void)
         break;
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "ota failed after retries: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "ota failed: %s", esp_err_to_name(err));
         s_state.phase = OTA_PHASE_FAIL;
         return err;
     }
@@ -663,6 +713,55 @@ static esp_err_t ota_perform(void)
     s_state.percent = 100;
     s_state.phase = OTA_PHASE_READY;
     return ESP_OK;
+}
+
+/**
+ * 下载升级包：先按 manifest 给的地址下，失败再换 jsDelivr / raw 的版本化地址。
+ *
+ * manifest 里的 url 指向 raw.githubusercontent.com（CDN 的 618 防护与
+ * 国内可达性问题前面说过）。manifest 能取到、bin 下不下来，是这套 OTA
+ * 最容易卡死的一步 —— 所以 bin 也要有备用源。
+ */
+static esp_err_t ota_perform(void)
+{
+    char cands[3][512];
+    int n = 0;
+
+    if (s_manifest.url[0]) {
+        strlcpy(cands[n], s_manifest.url, sizeof(cands[0]));
+        n++;
+    }
+    if (s_manifest.version[0]) {
+        snprintf(cands[n], sizeof(cands[0]),
+                 "https://cdn.jsdelivr.net/gh/ChenadSH/bilimouse-esp32s3@v%s/ota/bilimouse.bin",
+                 s_manifest.version);
+        n++;
+        snprintf(cands[n], sizeof(cands[0]),
+                 "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v%s/ota/bilimouse.bin",
+                 s_manifest.version);
+        n++;
+    }
+    if (n == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = ESP_FAIL;
+    for (int i = 0; i < n; i++) {
+        char real[512];
+        err = http_resolve_url(cands[i], real, sizeof(real));
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "resolve bin url %d/%d failed: %s", i + 1, n,
+                     esp_err_to_name(err));
+            continue;
+        }
+        err = ota_perform_url(real);
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "bin source %d/%d failed: %s", i + 1, n, esp_err_to_name(err));
+    }
+    s_state.phase = OTA_PHASE_FAIL;
+    return err;
 }
 
 /** 升级完成/失败后的 5 秒倒计时重启（只在实际写成功后调用） */
@@ -802,14 +901,21 @@ static void check_task(void *arg)
 {
     (void)arg;
     ota_check_run(false);
+
+    /* 检查结论已经出来了，先把任务闸门放开：下面的蓝牙恢复 + WiFi 重连
+       可能要十几秒，这期间用户再点「开始检查更新」不该被「任务进行中」
+       挡回去（以前 s_task_busy 一路占到最后，看起来就像整个流程卡死）。 */
+    s_task_busy = false;
+
     /* 没有发现新版本（已是最新 / 失败）就把蓝牙拉回来；
        发现有新版本（READY）则保持关闭，等下载/升级完重启。 */
     if (s_state.phase != OTA_PHASE_READY) {
+        s_wifi_quiet = true;
         wifi_drop_for_ble();
         hid_ble_resume();
         wifi_ensure_connected();   /* 电台还要用网；失败也不影响下次重试 */
+        s_wifi_quiet = false;
     }
-    s_task_busy = false;
     vTaskDelete(NULL);
 }
 
@@ -819,11 +925,15 @@ static void download_task(void *arg)
     ota_download_run();
     /* 成功路径会走倒数重启，到不了这里；失败则恢复蓝牙 */
     if (s_state.phase == OTA_PHASE_FAIL) {
+        s_task_busy = false;
+        s_wifi_quiet = true;
         wifi_drop_for_ble();
         hid_ble_resume();
         wifi_ensure_connected();
+        s_wifi_quiet = false;
+    } else {
+        s_task_busy = false;
     }
-    s_task_busy = false;
     vTaskDelete(NULL);
 }
 
