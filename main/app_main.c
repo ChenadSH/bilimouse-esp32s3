@@ -164,9 +164,11 @@ static void ir_learn_task(void *arg)
     (void)arg;
     s_ir_learning = true;
     ir_refresh("学习中");
-    ui_set_footer("对准设备，按一下遥控器");
+    ui_set_footer("对准接收头，短按一下遥控器");
 
-    esp_err_t e = ir_remote_learn(8000);
+    /* 15s 窗口内循环等完整帧：NEC 长按只会收到 2 符号重复码，
+       学习器会吞掉短帧继续等（ir_remote_learn 内部处理） */
+    esp_err_t e = ir_remote_learn(15000);
 
     s_ir_learning = false;
     if (e == ESP_OK) {
@@ -174,7 +176,7 @@ static void ir_learn_task(void *arg)
         ui_set_footer("已写入 flash，重启/重烧固件都不丢");
     } else {
         ir_refresh("没收到信号");
-        ui_set_footer("靠近一点，确认接收头接 GPIO11");
+        ui_set_footer("别长按，短按一下；确认接收头接 GPIO11");
     }
     vTaskDelete(NULL);
 }
@@ -555,6 +557,7 @@ static void touch_task(void *arg)
     bool swallow = false;        /* 本次触摸只用来点亮屏幕，不执行动作 */
     bool home_gesture = false;   /* 首页空白处滑动 = 翻页，不移动指针 */
     int16_t first_x = 0;         /* 按下时的起始 x（计算滑动方向） */
+    int16_t first_y = 0;         /* 按下时的起始 y（轻点判定用位移而非路径长） */
     ui_button_t pressed_btn = UI_BTN_NONE;
     uint8_t hold_btn = 0;        /* 当前按住的鼠标键（左/右），0=没按住 */
     int16_t last_x = 0, last_y = 0;
@@ -609,6 +612,7 @@ static void touch_task(void *arg)
                     on_button = (pressed_btn != UI_BTN_NONE);
                     home_gesture = ui_mode_is_home() && !on_button;
                     first_x = (int16_t)sx;
+                    first_y = (int16_t)sy;
                     last_x = (int16_t)sx;
                     last_y = (int16_t)sy;
                     press_ms = now;
@@ -712,20 +716,31 @@ static void touch_task(void *arg)
                     hold_btn = 0;
                 } else if (on_button && pressed_btn != UI_BTN_NONE) {
                     /* 首页 icon 长按 = 触摸校准：触摸漂移时按钮可能点不准，
-                       这是常驻的校准入口，绑在首页大磁贴上而不是藏菜单 */
+                       这是常驻的校准入口，绑在首页大磁贴上而不是藏菜单。
+                       ⚠️ 长按/轻点判定都用「按下点到最后点的位移」disp，
+                       不能用 moved（路径累计）：触摸采样有 ±2px 抖动，
+                       按住不动 1.5s 会累计出几百像素的路径长，长按校准和
+                       轻点点击会全部被误判成拖动 —— 这就是 macOS 上
+                       「点击完全没反应」的根因（手指越稳停留越久越容易踩中）。 */
+                    int32_t disp = (int32_t)abs(last_x - first_x) +
+                                   (int32_t)abs(last_y - first_y);
                     if (pressed_btn == UI_BTN_HOME_ICON0 &&
-                        moved < 12 && (now - press_ms) >= 1500) {
+                        disp < 16 && (now - press_ms) >= 1500) {
                         start_touch_cal();
                     } else {
                         /* 点击了按钮：执行对应动作 */
                         on_ui_button(pressed_btn, NULL);
                     }
-                } else if (moved < 12 && (now - press_ms) < 400 &&
-                           ui_mode_uses_pointer_click()) {
-                    /* 轻点空白处 = 左键单击。
-                       只在 B 站控制页和鼠标模式生效：电台/红外/OTA 页面上
-                       误触空白处不该把动作卡片刷成「点击/已执行」。 */
-                    perform_action(ACTION_CLICK_LEFT);
+                } else {
+                    int32_t disp = (int32_t)abs(last_x - first_x) +
+                                   (int32_t)abs(last_y - first_y);
+                    if (disp < 16 && (now - press_ms) < 400 &&
+                        ui_mode_uses_pointer_click()) {
+                        /* 轻点空白处 = 左键单击。
+                           只在 B 站控制页和鼠标模式生效：电台/红外/OTA 页面上
+                           误触空白处不该把动作卡片刷成「点击/已执行」。 */
+                        perform_action(ACTION_CLICK_LEFT);
+                    }
                 }
                 on_button = false;
                 pressed_btn = UI_BTN_NONE;

@@ -1,1 +1,1 @@
-{"version": "2.7.9", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.7.9/ota/bilimouse.bin", "notes": "台列表选台后返回电台播放页；电台页新增音量加减和常驻音量显示；修电台背景花屏(DMA分条缩到2行)；修鼠标左右键点击失效(按住抖动抑制+右键Ctrl+左键模拟)；首页emoji去白边白点、配色升级；切台提速(重定向复用连接+减小起播缓冲)", "size": 1934240}
+{"version": "2.8.0", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.8.0/ota/bilimouse.bin", "notes": "修鼠标点击失效根因：轻点/长按判定从路径累计改为按下点位移，触摸抖动不再把点击误判成拖动；红外学习大改：RMT收发开DMA、单帧上限96->192符号(支持空调长帧)，学习窗口15s内吞掉NEC重复短帧持续等完整帧，已学旧码自动迁移不丢", "size": 1934752}

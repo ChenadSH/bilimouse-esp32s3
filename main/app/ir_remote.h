@@ -61,7 +61,7 @@ esp_err_t ir_remote_clear_all(void);
 
 /**
  * 覆写指定槽（红外码导入用）。
- * @param count 1..96
+ * @param count 1..192
  * @return ESP_OK 写入并保存到 NVS+irbank 双副本
  */
 esp_err_t ir_remote_write_slot(uint8_t slot,

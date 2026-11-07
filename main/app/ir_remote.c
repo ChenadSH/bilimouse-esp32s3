@@ -19,6 +19,8 @@
 
 #include "esp_attr.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
@@ -228,6 +230,64 @@ static uint8_t active_load(void)
     return v;
 }
 
+/* ---- 上一生产格式：10 槽 × 96 symbol（v2.7.x）。
+   符号上限扩到 192 后 blob 长度变了，老码按长度识别后原样搬过来 ---- */
+#define IR_S96_MAX_SYMBOLS 96
+
+typedef struct {
+    uint16_t count;
+    uint16_t reserved;
+    rmt_symbol_word_t syms[IR_S96_MAX_SYMBOLS];
+} ir_slot_s96_t;
+
+typedef struct {
+    uint32_t  magic;
+    uint16_t  version;
+    uint16_t  slot_count;
+    uint32_t  seq;
+    ir_slot_s96_t slots[IR_SLOT_COUNT];
+} ir_bank_s96_t;
+
+static bool migrate_v2_s96(ir_bank_t *out)
+{
+    static ir_bank_s96_t old EXT_RAM_BSS_ATTR __attribute__((aligned(4)));
+    size_t len = 0;
+    uint32_t seq = 0;
+    bool from_raw = (ir_store_load(&old, sizeof(old), &len, &seq) == ESP_OK &&
+                     len == sizeof(old));
+
+    if (!from_raw) {
+        nvs_handle_t h;
+        if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+            return false;
+        }
+        len = sizeof(old);
+        esp_err_t err = nvs_get_blob(h, NVS_KEY_IR, &old, &len);
+        nvs_close(h);
+        if (err != ESP_OK || len != sizeof(old)) {
+            return false;
+        }
+    }
+
+    if (old.magic != IR_BANK_MAGIC || old.version != IR_BANK_VERSION ||
+        old.slot_count != IR_SLOT_COUNT) {
+        return false;
+    }
+
+    bank_reset(out);
+    out->seq = old.seq;
+    for (int i = 0; i < IR_SLOT_COUNT; i++) {
+        out->slots[i].count = old.slots[i].count;
+        if (old.slots[i].count) {
+            memcpy(out->slots[i].syms, old.slots[i].syms,
+                   old.slots[i].count * sizeof(rmt_symbol_word_t));
+        }
+    }
+    ESP_LOGI(TAG, "migrated 96-symbol bank (seq %u) to 192-symbol format",
+             (unsigned)old.seq);
+    return true;
+}
+
 /* ==================== 统一保存 / 载入 ==================== */
 
 /** 写入两份副本。只要有一份成功就算成功（另一份下次会自愈） */
@@ -287,7 +347,7 @@ static esp_err_t bank_load(void)
         ESP_LOGW(TAG, "flash mirror missing - rebuilding it from nvs (%u slots)",
                  (unsigned)ir_remote_loaded_count());
         ir_store_save(&s_bank, sizeof(s_bank), s_bank.seq);
-    } else if (migrate_v2_l4(&s_bank) || migrate_v1(&s_bank)) {
+    } else if (migrate_v2_s96(&s_bank) || migrate_v2_l4(&s_bank) || migrate_v1(&s_bank)) {
         /* 4 槽 v2 或更老的 v1 升上来的：把迁移结果落到两份新存档里 */
         ESP_LOGI(TAG, "migrated to %u-slot storage, writing both copies",
                  (unsigned)IR_SLOT_COUNT);
@@ -359,26 +419,40 @@ esp_err_t ir_remote_learn(uint32_t timeout_ms)
 
     static rmt_symbol_word_t buf[BSP_IR_MAX_SYMBOLS] __attribute__((aligned(4)));
     ESP_LOGI(TAG, "learning slot %u, waiting for signal...", s_active);
-    size_t n = bsp_ir_capture(buf, BSP_IR_MAX_SYMBOLS, timeout_ms);
-    if (n < IR_MIN_SYMS) {
-        ESP_LOGW(TAG, "no valid signal captured (%u syms)", (unsigned)n);
-        return ESP_ERR_TIMEOUT;
+
+    /* 学习窗口内循环捕获：
+       - NEC 遥控器「长按」时主帧只发一次，之后全是 2 符号的重复码 ——
+         用户按住不松手时收到的永远是重复码，以前直接判失败，
+         这就是「学习很难成功」的最大来源；现在吞掉短帧继续等。
+       - 截断/噪声帧（<IR_MIN_SYMS）同理：不放弃，等下一帧。 */
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    for (;;) {
+        int32_t left = (int32_t)(deadline - xTaskGetTickCount());
+        if (left <= 0) {
+            ESP_LOGW(TAG, "no valid signal within %ums", (unsigned)timeout_ms);
+            return ESP_ERR_TIMEOUT;
+        }
+
+        size_t n = bsp_ir_capture(buf, BSP_IR_MAX_SYMBOLS, (uint32_t)left);
+        if (n == 0) {
+            return ESP_ERR_TIMEOUT;   /* 总超时耗尽 */
+        }
+
+        n = trim_symbols(buf, n);
+        if (n < IR_MIN_SYMS) {
+            ESP_LOGI(TAG, "short/repeat frame (%u syms), keep listening", (unsigned)n);
+            continue;
+        }
+
+        ir_slot_t *slot = &s_bank.slots[s_active];
+        memset(slot, 0, sizeof(*slot));
+        slot->count = (uint16_t)n;
+        memcpy(slot->syms, buf, n * sizeof(rmt_symbol_word_t));
+
+        ESP_LOGI(TAG, "slot %u learned: %u symbols, first=%u/%u us",
+                 s_active, (unsigned)n, buf[0].duration0, buf[0].duration1);
+        return bank_save();
     }
-
-    n = trim_symbols(buf, n);
-    if (n < IR_MIN_SYMS) {
-        ESP_LOGW(TAG, "signal too short after trim (%u syms)", (unsigned)n);
-        return ESP_ERR_TIMEOUT;
-    }
-
-    ir_slot_t *slot = &s_bank.slots[s_active];
-    memset(slot, 0, sizeof(*slot));
-    slot->count = (uint16_t)n;
-    memcpy(slot->syms, buf, n * sizeof(rmt_symbol_word_t));
-
-    ESP_LOGI(TAG, "slot %u learned: %u symbols, first=%u/%u us",
-             s_active, (unsigned)n, buf[0].duration0, buf[0].duration1);
-    return bank_save();
 }
 
 esp_err_t ir_remote_send(void)

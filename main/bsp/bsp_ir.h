@@ -34,8 +34,10 @@ extern "C" {
 #define BSP_IR_TX_GPIO      10
 #define BSP_IR_RX_GPIO      11
 
-/** 单帧最多缓存的 symbol 数（1 symbol = 一对「电平+时长」） */
-#define BSP_IR_MAX_SYMBOLS  96
+/** 单帧最多缓存的 symbol 数（1 symbol = 一对「电平+时长」）。
+   96 只够 NEC(67)；空调遥控器的整帧状态码普遍 100~180 个符号，
+   96 会截断成永远发射无效的残码 —— 已配合 RMT DMA 扩到 192。 */
+#define BSP_IR_MAX_SYMBOLS  192
 
 /** 初始化 RMT 收发通道（未接硬件也能成功，只是收不到信号） */
 esp_err_t bsp_ir_init(void);

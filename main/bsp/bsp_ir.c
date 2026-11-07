@@ -14,8 +14,9 @@ static const char *TAG = "bsp_ir";
 
 /* 1MHz 分辨率：1 tick = 1us，NEC 的 560us/1690us 正好是整数 tick */
 #define IR_RESOLUTION_HZ   1000000
-/* 每通道 96 个 symbol（S3 一共 4 个 48 字的 block，收发各占 2 个）。
-   NEC 一帧 = 引导码 2 + 32 位 ×2 + 结束位 1 = 67 symbol，够用。 */
+/* 收发都开 DMA：S3 片上 RMT RAM 每通道最多 96 symbol，而空调遥控器的
+   整帧状态码普遍 100~180 个符号 —— 不开 DMA 学到的是截断残码，
+   「已学会」但发射永远无效。开 DMA 后上限由缓冲区决定（192）。 */
 #define IR_MEM_SYMBOLS     96
 #define IR_CARRIER_HZ      38000
 #define IR_CARRIER_DUTY    33      /* 占空比 33%，红外 LED 的常规值 */
@@ -56,18 +57,18 @@ static inline void sym_set(rmt_symbol_word_t *s, uint16_t d0, bool l0, uint16_t 
     s->level1    = l1;
 }
 
-/* RMT TX 非 DMA 模式下，copy 编码器在发送中断里直接读用户缓冲，
-   缓冲区必须在内部 RAM。调用方的码库存在 PSRAM（ir_remote.c 的
-   s_bank 是 EXT_RAM_BSS），flash 操作（NVS 写入）期间 cache 关闭，
-   此时 ISR 读 PSRAM 会直接崩溃。先搬到内部 RAM 再发。 */
-static rmt_symbol_word_t s_tx_stage[IR_MEM_SYMBOLS] __attribute__((aligned(4)));
+/* RMT TX 开了 DMA：发送期间硬件直接从内存搬数据，缓冲区必须在内部 RAM
+   （DMA 摸不到 PSRAM，且 flash 操作期间 cache 关闭时 PSRAM 也读不得）。
+   调用方的码库存在 PSRAM（ir_remote.c 的 s_bank 是 EXT_RAM_BSS），
+   先搬到这块内部 RAM 再发。 */
+static rmt_symbol_word_t s_tx_stage[BSP_IR_MAX_SYMBOLS] __attribute__((aligned(4)));
 
 esp_err_t bsp_ir_send_raw(const rmt_symbol_word_t *syms, size_t count)
 {
     if (!s_ready || !s_tx_chan) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (!syms || count == 0 || count > IR_MEM_SYMBOLS) {
+    if (!syms || count == 0 || count > BSP_IR_MAX_SYMBOLS) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -115,8 +116,8 @@ size_t bsp_ir_capture(rmt_symbol_word_t *out, size_t max_symbols, uint32_t timeo
     if (!s_ready || !s_rx_chan || !out || max_symbols == 0) {
         return 0;
     }
-    if (max_symbols > IR_MEM_SYMBOLS) {
-        max_symbols = IR_MEM_SYMBOLS;
+    if (max_symbols > BSP_IR_MAX_SYMBOLS) {
+        max_symbols = BSP_IR_MAX_SYMBOLS;
     }
 
     /* signal_range_max_ns = 25ms：接收头在最后一个跳变后静默 25ms
@@ -205,6 +206,12 @@ esp_err_t bsp_ir_init(void)
         .resolution_hz = IR_RESOLUTION_HZ,
         .mem_block_symbols = IR_MEM_SYMBOLS,
         .trans_queue_depth = 4,
+        .flags = {
+            /* DMA 模式：片上 RAM 的 96 symbol 装不下空调长帧；
+               开 DMA 后帧长只受 s_tx_stage 缓冲限制（192）。
+               注意 DMA 要求发送缓冲在内部 RAM —— s_tx_stage 就是。 */
+            .with_dma = true,
+        },
     };
     ESP_RETURN_ON_ERROR(rmt_new_tx_channel(&tx_cfg, &s_tx_chan), TAG, "tx channel failed");
 
@@ -225,8 +232,12 @@ esp_err_t bsp_ir_init(void)
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .resolution_hz = IR_RESOLUTION_HZ,
         .mem_block_symbols = IR_MEM_SYMBOLS,
-        .flags.invert_in = true,   /* 接收头低电平有效 -> 翻成 level=1 表示有载波 */
-        .flags.with_dma = false,
+        .flags = {
+            .invert_in = true,   /* 接收头低电平有效 -> 翻成 level=1 表示有载波 */
+            /* DMA 模式：接收缓冲（192 symbol）超过片上 RAM 的 96 也能收，
+               缓冲必须在内部 RAM（ir_remote_learn 的 static buf 满足）。 */
+            .with_dma = true,
+        },
     };
     ESP_RETURN_ON_ERROR(rmt_new_rx_channel(&rx_cfg, &s_rx_chan), TAG, "rx channel failed");
 
