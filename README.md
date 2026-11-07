@@ -36,6 +36,45 @@ idf.py build && idf.py -p /dev/ttyUSB0 flash monitor
 > `tools/idf.bat` 已适配本机环境（IDF v6.0.2 + xtensa-esp-elf 15.2.0），
 > 并自动绕过 MSYS 环境限制。详见 `tools/env.bat`。
 
+### 1.5 不装 ESP-IDF：macOS / Linux 直接用 esptool 烧仓库里的 bin
+
+仓库的 `ota/` 只有 **app 镜像**，`ota/factory/` 才是启动引导。**四个文件缺一不可**，
+而且 app 的偏移是 **0x20000**，不是 0x0：
+
+```bash
+# 1) 装 esptool（只需一次）
+pip3 install --user esptool
+
+# 2) 看串口名：macOS 形如 /dev/cu.usbserial-1420 或 /dev/cu.wchusbserial1420
+ls /dev/cu.*
+
+# 3) 完整烧录（先 cd 到仓库根目录）
+python3 -m esptool --chip esp32s3 -p /dev/cu.usbserial-1420 -b 460800 \
+  --before default-reset --after hard-reset write_flash \
+  --flash-mode dio --flash-freq 80m --flash-size 16MB \
+  0x0     ota/factory/bootloader.bin \
+  0x8000  ota/factory/partition-table.bin \
+  0x10000 ota/factory/ota_data_initial.bin \
+  0x20000 ota/bilimouse.bin
+```
+
+| 偏移 | 文件 | 漏了会怎样 |
+|---|---|---|
+| `0x0` | bootloader.bin | **黑屏**，串口一个字都不打印（ROM 找不到二级引导） |
+| `0x8000` | partition-table.bin | 黑屏或 `invalid magic number` 反复重启 |
+| `0x10000` | ota_data_initial.bin | 卡在旧固件 / 引导到空槽，屏幕停在开机第一帧 |
+| `0x20000` | bilimouse.bin（app） | 前面三个对、这个写错偏移 → 黑屏或跑旧版本 |
+
+> ⚠️ **常见错误**：把 `bilimouse.bin` 写到 `0x0`（多数教程对单片 app 用 0x0，
+> 但本项目的 app 在 `ota_0` = 0x20000）。写到 0x0 会直接覆盖 bootloader，
+> 设备从此既不启动也没串口输出，必须按上表四个文件全烧才能救回来。
+>
+> 只更新固件、不需要救砖时，可以只烧 app：
+> ```bash
+> python3 -m esptool --chip esp32s3 -p /dev/cu.usbserial-1420 -b 460800 \
+>   write_flash 0x20000 ota/bilimouse.bin
+> ```
+
 ### 2. 配对
 
 1. 烧录后上电，屏幕显示「未连接」

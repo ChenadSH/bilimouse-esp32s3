@@ -47,19 +47,71 @@ static bool s_wifi_inited;
 static bool s_netif_created;   /* 默认 STA netif 是否已创建（只能创建一次，
                                   重复创建会触发 esp_netif 断言 -> 重启） */
 static volatile bool s_wifi_got_ip;
+/* 正在切换凭据（wifi_try_cred 内部）。切换期间驱动会因为 set_config
+   主动断开旧 AP，若回调此时再 esp_wifi_connect() 就会和新凭据抢连接，
+   导致新 SSID 一直排不上队 —— 这是备用热点连不上的直接原因之一。 */
+static volatile bool s_cred_switching;
 static esp_event_handler_instance_t s_ev_any;
 static esp_event_handler_instance_t s_ev_ip;
 
 /* 升级状态快照与 WiFi 步骤文案（定义见「状态快照」小节） */
 static void state_wifi(const char *txt);
 
+/** 断开原因 → 人能看懂的一句话。
+ *  reason 是判断「连不上」到底卡在哪一层的唯一硬证据：
+ *  201/210 = 根本没扫到这个 SSID（写错/5GHz/太远）
+ *  202/15  = 扫到了但认证不过（密码错 / 需要 802.1X 或网页登录）
+ *  203     = AP 拒绝关联（加密方式不匹配，如强制 WPA3/PMF） */
+static const char *wifi_reason_str(int r)
+{
+    switch (r) {
+    case WIFI_REASON_NO_AP_FOUND:
+        return "扫不到该 SSID(信号弱/不在 2.4G/名字写错)";
+    case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+        return "扫到 AP 但加密方式不兼容";
+    case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
+        return "AP 加密低于 authmode 阈值";
+    case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD:
+        return "信号低于 RSSI 阈值";
+    case WIFI_REASON_AUTH_FAIL:
+        return "认证被拒(密码错/需 802.1X 或网页登录)";
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+        return "四次握手超时(密码错)";
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+        return "握手超时";
+    case WIFI_REASON_ASSOC_FAIL:
+        return "关联被拒(AP 不接受该加密/需 PMF)";
+    case WIFI_REASON_CONNECTION_FAIL:
+        return "连接失败";
+    case WIFI_REASON_BEACON_TIMEOUT:
+        return "信标丢失(信号中断)";
+    case WIFI_REASON_MIC_FAILURE:
+        return "MIC 校验失败(密码错)";
+    case WIFI_REASON_AUTH_EXPIRE:
+        return "认证超时";
+    default:
+        return "其他原因";
+    }
+}
+
 static void wifi_event_cb(void *arg, esp_event_base_t base,
                           int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *d = (wifi_event_sta_disconnected_t *)data;
         s_wifi_got_ip = false;
-        ESP_LOGW(TAG, "wifi disconnected, retrying...");
-        esp_wifi_connect();
+        if (d) {
+            /* v6 的 disconnected 事件没有 channel 字段，ssid 也不保证
+               以 '\0' 结尾，必须按 ssid_len 打印。 */
+            ESP_LOGW(TAG, "wifi disconnected: reason=%u (%s) ssid='%.*s' rssi=%d",
+                     (unsigned)d->reason, wifi_reason_str(d->reason),
+                     (int)d->ssid_len, (const char *)d->ssid, d->rssi);
+        }
+        /* 只在「当前凭据的自动重试」场景里重连；切凭据期间由
+           wifi_try_cred 自己控制 connect，避免两路抢同一个 STA。 */
+        if (!s_cred_switching) {
+            esp_wifi_connect();
+        }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
         s_wifi_got_ip = true;
@@ -151,18 +203,71 @@ static int creds_collect(wifi_cred_t *list, int max, bool *nvs_used)
     return n;
 }
 
+/** 打印候选凭据的真实字节，用来抓「看不见」的问题：
+ *  中文 SSID 被 Kconfig 存成 GBK/乱码、末尾多一个空格、全角字符等。
+ *  这类问题密码再对也连不上，而且日志里肉眼看不出差别。 */
+static void creds_dump(const wifi_cred_t *list, int n)
+{
+    for (int i = 0; i < n; i++) {
+        char hex[3 * 34 + 1];
+        int k = 0;
+        for (const unsigned char *p = (const unsigned char *)list[i].ssid;
+             *p && k < (int)sizeof(hex) - 4; p++) {
+            k += snprintf(hex + k, sizeof(hex) - (size_t)k, "%02X ", *p);
+        }
+        hex[k] = '\0';
+        ESP_LOGI(TAG, "cred[%d] ssid='%s' (%uB) hex=%s pass_len=%u",
+                 i, list[i].ssid, (unsigned)strlen(list[i].ssid), hex,
+                 (unsigned)strlen(list[i].pass));
+    }
+}
+
 /** 对单个凭据尝试连接。成功返回 true 并保持连接。 */
 static bool wifi_try_cred(const wifi_cred_t *c)
 {
+    /* 1) 先把上一轮的状态彻底清掉。
+          不 disconnect 直接 set_config，驱动可能还挂在旧 AP 的
+          connect 流程里，新的 SSID 永远发不出 probe。 */
+    s_cred_switching = true;
+    esp_wifi_disconnect();          /* 未连接时返回 ERR_WIFI_NOT_CONNECT，忽略 */
+    vTaskDelay(pdMS_TO_TICKS(150));
+    s_wifi_got_ip = false;
+
     wifi_config_t wc = {0};
     strlcpy((char *)wc.sta.ssid, c->ssid, sizeof(wc.sta.ssid));
     strlcpy((char *)wc.sta.password, c->pass, sizeof(wc.sta.password));
-    esp_wifi_set_config(WIFI_IF_STA, &wc);
-    esp_wifi_connect();
+    wc.sta.threshold.authmode = WIFI_AUTH_OPEN;   /* 不设最低加密要求 */
+    /* 2) 现代 AP（含手机热点）几乎都开 PMF / WPA3。
+          默认 pmf_cfg.capable=false，AP 会直接拒关联（reason 203/30），
+          表现就是「密码明明对，就是连不上」。 */
+    wc.sta.pmf_cfg.capable  = true;
+    wc.sta.pmf_cfg.required = false;   /* 混合模式仍允许走纯 WPA2 */
+    wc.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
 
-    for (int waited = 0; waited < WIFI_TIMEOUT_MS && !s_wifi_got_ip; waited += 200) {
-        vTaskDelay(pdMS_TO_TICKS(200));
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &wc);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "set_config(%s) failed: %s", c->ssid, esp_err_to_name(err));
+        s_cred_switching = false;
+        return false;
     }
+
+    /* 3) 单凭据内重试 2 轮（每轮 5s）。ESP-IDF 不会自己重连，
+          只打一次 connect 的话一次失败就永远错过这个热点。 */
+    for (int attempt = 0; attempt < 2 && !s_wifi_got_ip; attempt++) {
+        err = esp_wifi_connect();
+        if (err != ESP_OK && err != ESP_ERR_WIFI_CONN) {
+            ESP_LOGW(TAG, "connect(%s) attempt %d: %s", c->ssid, attempt + 1,
+                     esp_err_to_name(err));
+        }
+        for (int waited = 0; waited < (WIFI_TIMEOUT_MS / 2) && !s_wifi_got_ip;
+             waited += 200) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+    }
+    if (!s_wifi_got_ip) {
+        esp_wifi_disconnect();
+    }
+    s_cred_switching = false;
     return s_wifi_got_ip;
 }
 
@@ -186,21 +291,22 @@ static esp_err_t wifi_ensure_connected(void)
         return ESP_OK;
     }
 
-    wifi_cred_t list[3];
+    wifi_cred_t list[4];
     bool nvs_used = false;
-    int n = creds_collect(list, 3, &nvs_used);
+    int n = creds_collect(list, 4, &nvs_used);
     if (n == 0) {
         ESP_LOGW(TAG, "no wifi credentials (serial: 'wifi set <ssid> <pass>')");
         return ESP_ERR_INVALID_STATE;
     }
+    /* 槽位 = 1 个 NVS + 3 个编译期默认。之前只有 3 个槽，一旦用过
+       `wifi set`，第三个默认热点会被挤出去，永远没机会尝试。 */
+    creds_dump(list, n);
 
-    bool any_configured = false;
     for (int i = 0; i < n && !s_wifi_got_ip; i++) {
-        ESP_LOGI(TAG, "wifi connecting: %s%s", list[i].ssid,
+        ESP_LOGI(TAG, "wifi connecting [%d/%d]: '%s'%s", i + 1, n, list[i].ssid,
                  (i == 0 && nvs_used) ? " (NVS)" : "");
-        any_configured = true;
-        /* 屏上同步显示正在试哪个热点：三个热点串行各等 9s，
-           每换一个热点都有反馈，最坏 27s 内出结论。 */
+        /* 屏上同步显示正在试哪个热点：逐个串行尝试，每次都有反馈，
+           最坏 3 个 × 2 轮 × 5s = 30s 内出结论。 */
         char wifi_txt[48];
         snprintf(wifi_txt, sizeof(wifi_txt), "正在连 %s", list[i].ssid);
         state_wifi(wifi_txt);
@@ -208,10 +314,13 @@ static esp_err_t wifi_ensure_connected(void)
         if (s_wifi_got_ip) {
             snprintf(wifi_txt, sizeof(wifi_txt), "已连 %s", list[i].ssid);
             state_wifi(wifi_txt);
-            ESP_LOGI(TAG, "wifi connected via %s", list[i].ssid);
+            ESP_LOGI(TAG, "wifi connected via '%s'", list[i].ssid);
         }
     }
-    (void)any_configured;
+    if (!s_wifi_got_ip) {
+        ESP_LOGW(TAG, "all %d credentials failed (看上面 reason= 行定位)", n);
+        state_wifi("WiFi 连接失败");
+    }
     return s_wifi_got_ip ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
@@ -818,15 +927,105 @@ static void auto_check_task(void *arg)
 
 #include "esp_console.h"
 
+static const char *authmode_str(wifi_auth_mode_t m)
+{
+    switch (m) {
+    case WIFI_AUTH_OPEN:            return "OPEN(无密码)";
+    case WIFI_AUTH_WEP:             return "WEP";
+    case WIFI_AUTH_WPA_PSK:         return "WPA-PSK(老)";
+    case WIFI_AUTH_WPA2_PSK:        return "WPA2-PSK";
+    case WIFI_AUTH_WPA_WPA2_PSK:    return "WPA/WPA2-PSK";
+    case WIFI_AUTH_ENTERPRISE:      return "WPA2-ENTERPRISE(要域账号,固件不支持)";
+    case WIFI_AUTH_WPA3_PSK:        return "WPA3-PSK";
+    case WIFI_AUTH_WPA2_WPA3_PSK:   return "WPA2/WPA3-PSK";
+    case WIFI_AUTH_WAPI_PSK:        return "WAPI-PSK";
+    case WIFI_AUTH_OWE:             return "OWE";
+    case WIFI_AUTH_WPA3_ENT_192:    return "WPA3-ENT-192(不支持)";
+    case WIFI_AUTH_WPA3_ENTERPRISE: return "WPA3-ENTERPRISE(不支持)";
+    case WIFI_AUTH_WPA_ENTERPRISE:  return "WPA-ENTERPRISE(不支持)";
+    default:                        return "UNKNOWN";
+    }
+}
+
+/** 扫一下周围有哪些热点、用什么加密。
+ *  这是回答「为什么某个 SSID 连不上」的唯一硬证据：
+ *  - 列表里根本没有它   → SSID 写错 / 是 5GHz / 太远
+ *  - 有但显示 ENTERPRISE → 需要 802.1X 域账号，本固件不支持
+ *  - 有且 WPA3           → 需要 PMF（已在 try_cred 里开）
+ *  - RSSI < -85          → 信号太弱 */
+static int cmd_wifi_scan(void)
+{
+    if (wifi_init_once() != ESP_OK) {
+        printf("wifi init failed\n");
+        return 1;
+    }
+    esp_wifi_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    wifi_scan_config_t sc = { .show_hidden = true };
+    esp_err_t err = esp_wifi_scan_start(&sc, true);
+    if (err != ESP_OK) {
+        printf("scan failed: %s\n", esp_err_to_name(err));
+        return 1;
+    }
+    uint16_t total = 0;
+    esp_wifi_scan_get_ap_num(&total);
+    uint16_t want = total > 15 ? 15 : total;
+    wifi_ap_record_t *recs = calloc(want ? want : 1, sizeof(wifi_ap_record_t));
+    if (!recs) {
+        printf("oom\n");
+        esp_wifi_clear_ap_list();
+        return 1;
+    }
+    if (want) {
+        esp_wifi_scan_get_ap_records(&want, recs);
+    }
+    printf("found %u AP(s), showing %u (RSSI 越接近 0 越强)\n", total, want);
+    printf("%-28s %3s %5s  %s\n", "SSID", "CH", "RSSI", "AUTH");
+    for (int i = 0; i < want; i++) {
+        printf("%-28s %3d %5d  %s\n", (const char *)recs[i].ssid,
+               recs[i].primary, recs[i].rssi, authmode_str(recs[i].authmode));
+    }
+    free(recs);
+    printf("--- 对照一下配置里的 SSID ---\n");
+    wifi_cred_t list[4];
+    bool nvs_used = false;
+    int n = creds_collect(list, 4, &nvs_used);
+    for (int i = 0; i < n; i++) {
+        printf("  #%d '%s'%s\n", i + 1, list[i].ssid, (i == 0 && nvs_used) ? " (NVS)" : "");
+    }
+    wifi_ensure_connected();   /* 扫完恢复连接 */
+    return 0;
+}
+
 static int cmd_wifi(int argc, char **argv)
 {
     if (argc == 1) {
-        wifi_cred_t list[3];
+        wifi_cred_t list[4];
         bool nvs_used = false;
-        creds_collect(list, 3, &nvs_used);
-        printf("wifi %s, configured ssid: %s%s\n",
-               s_wifi_got_ip ? "connected" : "not connected", list[0].ssid,
-               nvs_used ? " (NVS)" : "");
+        int n = creds_collect(list, 4, &nvs_used);
+        printf("wifi %s\n", s_wifi_got_ip ? "connected" : "not connected");
+        for (int i = 0; i < n; i++) {
+            printf("  #%d '%s' pass_len=%u%s\n", i + 1, list[i].ssid,
+                   (unsigned)strlen(list[i].pass),
+                   (i == 0 && nvs_used) ? " (NVS, 优先)" : "");
+        }
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "scan") == 0) {
+        return cmd_wifi_scan();
+    }
+    if (argc == 3 && strcmp(argv[1], "clear") == 0) {
+        nvs_handle_t h;
+        if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+            printf("error: nvs not ready\n");
+            return 1;
+        }
+        nvs_erase_key(h, NVS_KEY_SSID);
+        nvs_erase_key(h, NVS_KEY_PASS);
+        nvs_commit(h);
+        nvs_close(h);
+        printf("ok: NVS credentials cleared, 回落到编译期默认\n");
         return 0;
     }
     if (argc == 4 && strcmp(argv[1], "set") == 0) {
@@ -839,13 +1038,14 @@ static int cmd_wifi(int argc, char **argv)
         nvs_set_str(h, NVS_KEY_PASS, argv[3]);
         nvs_commit(h);
         nvs_close(h);
-        printf("ok: credentials saved, connecting...\n");
+        printf("ok: credentials saved (ssid %uB, pass %uB), connecting...\n",
+               (unsigned)strlen(argv[2]), (unsigned)strlen(argv[3]));
         s_wifi_got_ip = false;
         wifi_ensure_connected();
-        printf("wifi %s\n", s_wifi_got_ip ? "connected" : "FAILED (check ssid/pass)");
+        printf("wifi %s\n", s_wifi_got_ip ? "connected" : "FAILED (看 reason= 日志)");
         return 0;
     }
-    printf("usage: wifi | wifi set <ssid> <pass>\n");
+    printf("usage: wifi | wifi scan | wifi set <ssid> <pass> | wifi clear\n");
     return 1;
 }
 
@@ -891,8 +1091,8 @@ esp_err_t ota_update_init(void)
 
     esp_console_cmd_t wifi_cmd = {
         .command = "wifi",
-        .help = "Show/set WiFi credentials for OTA",
-        .hint = "[set <ssid> <pass>]",
+        .help = "Show/scan/set WiFi credentials for OTA",
+        .hint = "[scan | set <ssid> <pass> | clear]",
         .func = cmd_wifi,
     };
     esp_console_cmd_t ota_cmd = {

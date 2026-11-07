@@ -125,6 +125,24 @@ def main():
     (OTA_DIR / "bilimouse.bin").write_bytes(BIN.read_bytes())
     run(["git", "add", "ota/manifest.json"])
     run(["git", "add", "-f", "ota/bilimouse.bin"])   # 仓库 .gitignore 掉了 *.bin
+
+    # 3.6 「启动三件套」同步进 ota/factory/。
+    #   仓库里原本只有 app 镜像，Mac/Linux 用户用 esptool 手动烧录时
+    #   只能烧 app；一旦偏移写成 0x0 就把二级 bootloader 砸掉 -> 黑屏，
+    #   而且手上没有 bootloader 可以救。这三个文件一共 ~34KB，值得常驻。
+    FACTORY = OTA_DIR / "factory"
+    FACTORY.mkdir(exist_ok=True)
+    for src, dst in (
+        (ROOT / "build" / "bootloader" / "bootloader.bin", "bootloader.bin"),
+        (ROOT / "build" / "partition_table" / "partition-table.bin", "partition-table.bin"),
+        (ROOT / "build" / "ota_data_initial.bin", "ota_data_initial.bin"),
+    ):
+        if not src.exists():
+            sys.exit(f"error: 缺少编译产物 {src}")
+        (FACTORY / dst).write_bytes(src.read_bytes())
+        run(["git", "add", "-f", f"ota/factory/{dst}"])
+    print("factory images: bootloader / partition-table / ota_data_initial")
+
     subprocess.run(["git", "commit", "-m", f"ota assets: v{ver}"], cwd=ROOT)
     run(["git", "push", "origin", "master"])
 
