@@ -529,8 +529,14 @@ static esp_err_t manifest_fetch_once(ota_manifest_t *m, const char *url)
  *  现在改成多源串行、每个源 5~7s 超时，屏上实时显示「第几个源」，
  *  某个源不通立刻换下一个（jsDelivr 的国内可达性通常明显好于 raw）。 */
 static const char *const k_manifest_srcs[] = {
+    /* 1. 直连 raw：最新、最快（能通就 1s 内出结果） */
     "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/master/ota/manifest.json",
+    /* 2. gh-proxy 反代 raw：国内/公司网直连 GitHub 被墙时通常可用，
+       而且和直连一样是「实时内容」，不会读到旧版本。 */
+    "https://gh-proxy.com/https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/master/ota/manifest.json",
+    /* 3. jsDelivr：可用性最好，但分支引用有缓存（可能滞后几小时），放第 3 */
     "https://cdn.jsdelivr.net/gh/ChenadSH/bilimouse-esp32s3@master/ota/manifest.json",
+    /* 4. Releases 固定链接：会 302 到 objects.githubusercontent.com */
     "https://github.com/ChenadSH/bilimouse-esp32s3/releases/latest/download/manifest.json",
 };
 
@@ -543,7 +549,7 @@ static const char *const k_manifest_srcs[] = {
  */
 static esp_err_t manifest_fetch(ota_manifest_t *m)
 {
-    const char *srcs[4];
+    const char *srcs[5];
     int n = 0;
 
     /* NVS 里手动配的 URL（ota url ...）优先，便于自建镜像。
@@ -716,41 +722,59 @@ static esp_err_t ota_perform_url(const char *bin_url)
 }
 
 /**
- * 下载升级包：先按 manifest 给的地址下，失败再换 jsDelivr / raw 的版本化地址。
+ * 生成第 idx 个 bin 下载候选地址（写入 out）。
+ * 返回 false 表示没有这个候选（例如 manifest 没带 version）。
  *
- * manifest 里的 url 指向 raw.githubusercontent.com（CDN 的 618 防护与
- * 国内可达性问题前面说过）。manifest 能取到、bin 下不下来，是这套 OTA
- * 最容易卡死的一步 —— 所以 bin 也要有备用源。
+ * 为什么要多个：manifest 能取到、bin 下不下来，是这套 OTA 最容易卡死的一步。
+ * 候选里既要有「原地址」，也要有反代/镜像，否则一旦 raw 被墙，升级永远走不通。
+ */
+static bool bin_candidate(int idx, char *out, size_t len)
+{
+    switch (idx) {
+    case 0:   /* manifest 里给的原地址（raw 的 tag 路径，最权威） */
+        if (s_manifest.url[0] == '\0') {
+            return false;
+        }
+        strlcpy(out, s_manifest.url, len);
+        return true;
+    case 1:   /* gh-proxy 反代同一条地址：内容实时，国内可达性最好 */
+        if (s_manifest.url[0] == '\0') {
+            return false;
+        }
+        snprintf(out, len, "https://gh-proxy.com/%s", s_manifest.url);
+        return true;
+    case 2:   /* jsDelivr 按版本号：发布后要等 tag 缓存刷新，放最后 */
+        if (s_manifest.version[0] == '\0') {
+            return false;
+        }
+        snprintf(out, len,
+                 "https://cdn.jsdelivr.net/gh/ChenadSH/bilimouse-esp32s3@v%s/ota/bilimouse.bin",
+                 s_manifest.version);
+        return true;
+    default:
+        return false;
+    }
+}
+
+/**
+ * 下载升级包：按候选列表逐个尝试，全部失败才报错。
  */
 static esp_err_t ota_perform(void)
 {
-    char cands[3][512];
-    int n = 0;
-
-    if (s_manifest.url[0]) {
-        strlcpy(cands[n], s_manifest.url, sizeof(cands[0]));
-        n++;
-    }
-    if (s_manifest.version[0]) {
-        snprintf(cands[n], sizeof(cands[0]),
-                 "https://cdn.jsdelivr.net/gh/ChenadSH/bilimouse-esp32s3@v%s/ota/bilimouse.bin",
-                 s_manifest.version);
-        n++;
-        snprintf(cands[n], sizeof(cands[0]),
-                 "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v%s/ota/bilimouse.bin",
-                 s_manifest.version);
-        n++;
-    }
-    if (n == 0) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
     esp_err_t err = ESP_FAIL;
-    for (int i = 0; i < n; i++) {
+    bool tried = false;
+
+    for (int i = 0; i < 3; i++) {
+        char cand[512];
+        if (!bin_candidate(i, cand, sizeof(cand))) {
+            continue;
+        }
+        tried = true;
+
         char real[512];
-        err = http_resolve_url(cands[i], real, sizeof(real));
+        err = http_resolve_url(cand, real, sizeof(real));
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "resolve bin url %d/%d failed: %s", i + 1, n,
+            ESP_LOGW(TAG, "resolve bin url %d/3 failed: %s", i + 1,
                      esp_err_to_name(err));
             continue;
         }
@@ -758,7 +782,11 @@ static esp_err_t ota_perform(void)
         if (err == ESP_OK) {
             return ESP_OK;
         }
-        ESP_LOGW(TAG, "bin source %d/%d failed: %s", i + 1, n, esp_err_to_name(err));
+        ESP_LOGW(TAG, "bin source %d/3 failed: %s", i + 1, esp_err_to_name(err));
+    }
+
+    if (!tried) {
+        return ESP_ERR_INVALID_STATE;
     }
     s_state.phase = OTA_PHASE_FAIL;
     return err;
