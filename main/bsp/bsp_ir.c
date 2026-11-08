@@ -16,8 +16,12 @@ static const char *TAG = "bsp_ir";
 #define IR_RESOLUTION_HZ   1000000
 /* 收发都开 DMA：S3 片上 RMT RAM 每通道最多 96 symbol，而空调遥控器的
    整帧状态码普遍 100~180 个符号 —— 不开 DMA 学到的是截断残码，
-   「已学会」但发射永远无效。开 DMA 后上限由缓冲区决定（192）。 */
-#define IR_MEM_SYMBOLS     96
+   「已学会」但发射永远无效。
+   ⚠️ 开 DMA 后 mem_block_symbols 决定 DMA 节点容量（= mem_block_symbols*4
+   字节），rmt_receive 会校验接收缓冲不得超过它：这里必须与
+   BSP_IR_MAX_SYMBOLS 一致，否则每次接收都报 ESP_ERR_INVALID_ARG，
+   学习永远超时（v2.8.0 踩过：缓冲 192 而这里 96，红外直接废掉）。 */
+#define IR_MEM_SYMBOLS     BSP_IR_MAX_SYMBOLS
 #define IR_CARRIER_HZ      38000
 #define IR_CARRIER_DUTY    33      /* 占空比 33%，红外 LED 的常规值 */
 

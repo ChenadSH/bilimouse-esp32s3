@@ -1,1 +1,1 @@
-{"version": "2.8.0", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.8.0/ota/bilimouse.bin", "notes": "修鼠标点击失效根因：轻点/长按判定从路径累计改为按下点位移，触摸抖动不再把点击误判成拖动；红外学习大改：RMT收发开DMA、单帧上限96->192符号(支持空调长帧)，学习窗口15s内吞掉NEC重复短帧持续等完整帧，已学旧码自动迁移不丢", "size": 1934752}
+{"version": "2.8.1", "url": "https://raw.githubusercontent.com/ChenadSH/bilimouse-esp32s3/v2.8.1/ota/bilimouse.bin", "notes": "修2.8.0红外回归：RMT开DMA后mem_block_symbols必须等于接收缓冲192符号，否则rmt_receive每次都报容量不足导致学习永远超时。若鼠标连上但移动/点击全无效，请在MacBook蓝牙设置里删除BiliMouse后重新配对(清除macOS缓存的旧HID描述符)", "size": 1934752}
